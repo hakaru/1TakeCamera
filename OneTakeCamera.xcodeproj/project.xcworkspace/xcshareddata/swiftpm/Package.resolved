@@ -2,6 +2,15 @@
   "originHash" : "ce0fafb524366ba3fbe834ac8d9f1affd4ac8666bb63d9dfe714098b56e6e5a8",
   "pins" : [
     {
+      "identity" : "peerclock",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/hakaru/PeerClock.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "3c8f24a2d361160b361d1e399c3bcc3700a85779"
+      }
+    },
+    {
       "identity" : "swift-lame",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Phisto/swift-lame.git",

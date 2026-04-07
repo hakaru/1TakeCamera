@@ -12,6 +12,8 @@ public struct RootView: View {
     @State private var selectedPreset: CompressorPreset = .studio
     @State private var levelMonitor = LevelMonitor()
     @State private var showRecordingList = false
+    @State private var remote = RemoteControlService()
+    @State private var showSyncSheet = false
 
     // Lens selection — mirrored from CameraSession after prewarm.
     @State private var currentLensID: String = ""
@@ -76,9 +78,45 @@ public struct RootView: View {
 
             // Clip warning overlay (top layer).
             ClipWarningOverlay(isVisible: levelMonitor.isClipping)
+
+            // PeerClock status indicator — top right corner.
+            VStack {
+                HStack {
+                    Spacer()
+                    peerClockIndicator
+                        .padding(.top, 52)
+                        .padding(.trailing, 16)
+                }
+                Spacer()
+            }
         }
         .sheet(isPresented: $showRecordingList) {
             RecordingListView()
+        }
+        .sheet(isPresented: $showSyncSheet) {
+            NavigationStack {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("PeerClock Status")
+                        .font(.headline)
+                    Text(remote.syncStateDescription)
+                    Text("Peers: \(remote.peerCount)")
+                    if let coord = remote.coordinatorID {
+                        Text("Coordinator: \(coord)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .navigationTitle("PeerClock")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Close") { showSyncSheet = false }
+                    }
+                }
+            }
+            .presentationDetents([.medium])
         }
         .alert("Permission Denied", isPresented: $permissionDenied) {
             Button("OK") {}
@@ -86,6 +124,46 @@ public struct RootView: View {
             Text("Camera and microphone access are required. Enable them in Settings.")
         }
         .task {
+            // Wire RemoteControlService handlers before starting.
+            remote.onRemoteStartRequest = { [self] preset in
+                Task { @MainActor in
+                    selectedPreset = preset
+                    if CameraSession.isCameraAvailable && !session.captureSession.isRunning {
+                        let granted = await session.prewarm()
+                        guard granted else { return }
+                    }
+                    session.beginRecording(preset: preset)
+                }
+            }
+            remote.onRemoteStopRequest = { [self] in
+                Task { @MainActor in
+                    await session.stopRecording()
+                }
+            }
+            remote.currentStatusProvider = { [self] in
+                let stateString: String
+                switch viewState {
+                case .idle:        stateString = "idle"
+                case .recording:   stateString = "recording"
+                case .finalizing:  stateString = "finalizing"
+                case .done:        stateString = "idle"
+                case .failed:      stateString = "idle"
+                }
+                let filename: String?
+                if case .done(let url) = viewState {
+                    filename = url.lastPathComponent
+                } else {
+                    filename = nil
+                }
+                return RemoteStatus(
+                    state: stateString,
+                    presetID: selectedPreset.rawValue,
+                    elapsedSeconds: elapsedSeconds,
+                    latestFilename: filename
+                )
+            }
+            remote.start()
+
             session.onStateChange = { newState in
                 let newViewState = newState.toViewState
                 viewState = newViewState
@@ -95,6 +173,8 @@ public struct RootView: View {
                 } else {
                     recordingStartDate = nil
                 }
+                // Publish status on every state change.
+                remote.publishStatusUpdate()
             }
             // Prewarm: configure session + start preview before user taps record.
             if CameraSession.isCameraAvailable {
@@ -248,6 +328,37 @@ public struct RootView: View {
             )
             .ignoresSafeArea(edges: .bottom)
         )
+    }
+
+    // MARK: - PeerClock Indicator
+
+    private var peerClockIndicatorColor: Color {
+        if remote.isRunning && remote.peerCount > 0 { return .green }
+        if remote.isRunning { return .yellow }
+        return Color(white: 0.5)
+    }
+
+    @ViewBuilder
+    private var peerClockIndicator: some View {
+        Button {
+            showSyncSheet = true
+        } label: {
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(peerClockIndicatorColor)
+                    .frame(width: 8, height: 8)
+                if remote.peerCount > 0 {
+                    Text("\(remote.peerCount)")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Color.black.opacity(0.5))
+            .clipShape(Capsule())
+        }
+        .accessibilityLabel("PeerClock: \(remote.syncStateDescription), \(remote.peerCount) peer(s)")
     }
 
     // MARK: - Record Button

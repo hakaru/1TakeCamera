@@ -12,6 +12,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../../1Take/OneTakePackage"),
+        .package(url: "https://github.com/hakaru/PeerClock.git", branch: "main"),
     ],
     targets: [
         .target(
@@ -19,6 +20,7 @@ let package = Package(
             dependencies: [
                 .product(name: "OneTakeDSPCore", package: "OneTakePackage"),
                 .product(name: "OneTakeDSPPresets", package: "OneTakePackage"),
+                .product(name: "PeerClock", package: "PeerClock"),
             ]
         ),
     ]
