@@ -28,11 +28,16 @@ final class MovieWriter: @unchecked Sendable {
 
     // MARK: - Diagnostic counters (accessed only from captureQueue)
     private(set) var audioSamplesAppended: Int = 0
+    private(set) var audioBuffersAppended: Int = 0
     private(set) var videoFramesAppended: Int = 0
     private(set) var firstAudioPTS: CMTime = .invalid
     private(set) var lastAudioPTS: CMTime = .invalid
     private(set) var firstVideoPTS: CMTime = .invalid
     private(set) var lastVideoPTS: CMTime = .invalid
+    private(set) var droppedPreStartAudio: Int = 0
+    private(set) var droppedPreStartVideo: Int = 0
+    private(set) var droppedBackpressureAudio: Int = 0
+    private(set) var droppedBackpressureVideo: Int = 0
 
     // MARK: - Private
 
@@ -107,8 +112,14 @@ final class MovieWriter: @unchecked Sendable {
 
         // Drop any frames whose PTS is before the session start time
         // (i.e., the video frames that arrived before audio came online).
-        guard CMTimeCompare(pts, sessionStartTime) >= 0 else { return }
-        guard videoInput.isReadyForMoreMediaData else { return }
+        guard CMTimeCompare(pts, sessionStartTime) >= 0 else {
+            droppedPreStartVideo += 1
+            return
+        }
+        guard videoInput.isReadyForMoreMediaData else {
+            droppedBackpressureVideo += 1
+            return
+        }
 
         if firstVideoPTS == .invalid { firstVideoPTS = pts }
         lastVideoPTS = pts
@@ -133,11 +144,18 @@ final class MovieWriter: @unchecked Sendable {
         }
 
         // Drop buffers whose PTS is before the session start time.
-        guard CMTimeCompare(pts, sessionStartTime) >= 0 else { return true }
-        guard audioInput.isReadyForMoreMediaData else { return false }
+        guard CMTimeCompare(pts, sessionStartTime) >= 0 else {
+            droppedPreStartAudio += 1
+            return true
+        }
+        guard audioInput.isReadyForMoreMediaData else {
+            droppedBackpressureAudio += 1
+            return false
+        }
 
         if firstAudioPTS == .invalid { firstAudioPTS = pts }
         lastAudioPTS = pts
+        audioBuffersAppended += 1
         audioSamplesAppended += CMSampleBufferGetNumSamples(sampleBuffer)
         audioInput.append(sampleBuffer)
         return true
@@ -178,6 +196,25 @@ final class MovieWriter: @unchecked Sendable {
     func finalize() async -> URL? {
         guard isStarted else { return nil }
 
+        // Snapshot all counters before clearing state
+        let snap = DiagSnapshot(
+            filename: outputURL.lastPathComponent,
+            sessionStartTime_s: sessionStartTime.seconds,
+            firstVideoPTS: firstVideoPTS,
+            lastVideoPTS: lastVideoPTS,
+            videoFramesAppended: videoFramesAppended,
+            droppedPreStartVideo: droppedPreStartVideo,
+            droppedBackpressureVideo: droppedBackpressureVideo,
+            firstAudioPTS: firstAudioPTS,
+            lastAudioPTS: lastAudioPTS,
+            audioSamplesAppended: audioSamplesAppended,
+            audioBuffersAppended: audioBuffersAppended,
+            droppedPreStartAudio: droppedPreStartAudio,
+            droppedBackpressureAudio: droppedBackpressureAudio,
+            pendingFirstVideoPTS: pendingFirstVideoPTS,
+            pendingFirstAudioPTS: pendingFirstAudioPTS
+        )
+
         // Log state before finalizing
         logger.info("""
             finalize() start — writerStatus=\(self.assetWriter.status.rawValue, privacy: .public) \
@@ -193,7 +230,12 @@ final class MovieWriter: @unchecked Sendable {
             firstAudio=\(self.firstAudioPTS.seconds, privacy: .public)s \
             lastAudio=\(self.lastAudioPTS.seconds, privacy: .public)s \
             videoFrames=\(self.videoFramesAppended, privacy: .public) \
-            audioSamples=\(self.audioSamplesAppended, privacy: .public)
+            audioSamples=\(self.audioSamplesAppended, privacy: .public) \
+            audioBuffers=\(self.audioBuffersAppended, privacy: .public) \
+            droppedPreStartVideo=\(self.droppedPreStartVideo, privacy: .public) \
+            droppedPreStartAudio=\(self.droppedPreStartAudio, privacy: .public) \
+            droppedBackpressureVideo=\(self.droppedBackpressureVideo, privacy: .public) \
+            droppedBackpressureAudio=\(self.droppedBackpressureAudio, privacy: .public)
             """)
 
         isStarted = false
@@ -206,10 +248,72 @@ final class MovieWriter: @unchecked Sendable {
 
         if finalStatus == .completed {
             logger.info("MovieWriter finalized: \(self.outputURL.path, privacy: .public)")
+            snap.write(nextTo: outputURL, logger: logger)
             return outputURL
         } else {
             logger.error("MovieWriter finalize failed: \(self.assetWriter.error?.localizedDescription ?? "unknown", privacy: .public)")
             return nil
+        }
+    }
+
+    // MARK: - Diagnostic Snapshot
+
+    private struct DiagSnapshot: Sendable {
+        let filename: String
+        let sessionStartTime_s: Double
+        let firstVideoPTS: CMTime
+        let lastVideoPTS: CMTime
+        let videoFramesAppended: Int
+        let droppedPreStartVideo: Int
+        let droppedBackpressureVideo: Int
+        let firstAudioPTS: CMTime
+        let lastAudioPTS: CMTime
+        let audioSamplesAppended: Int
+        let audioBuffersAppended: Int
+        let droppedPreStartAudio: Int
+        let droppedBackpressureAudio: Int
+        let pendingFirstVideoPTS: CMTime
+        let pendingFirstAudioPTS: CMTime
+
+        func write(nextTo mp4URL: URL, logger: Logger) {
+            let jsonURL = mp4URL.deletingPathExtension().appendingPathExtension("json")
+
+            let startupSkew_ms = (pendingFirstVideoPTS.isValid && pendingFirstAudioPTS.isValid)
+                ? (pendingFirstVideoPTS.seconds - pendingFirstAudioPTS.seconds) * 1000
+                : 0.0
+
+            // Build a plain dictionary for JSONSerialization (avoids Codable for simplicity)
+            let dict: [String: Any] = [
+                "filename": filename,
+                "sessionStartTime_s": sessionStartTime_s,
+                "startupSkew_ms": startupSkew_ms,
+                "video": [
+                    "firstPTS_s": firstVideoPTS.isValid ? firstVideoPTS.seconds : -1,
+                    "lastPTS_s": lastVideoPTS.isValid ? lastVideoPTS.seconds : -1,
+                    "frameCount": videoFramesAppended,
+                    "appendedCount": videoFramesAppended,
+                    "droppedPreStart": droppedPreStartVideo,
+                    "droppedBackpressure": droppedBackpressureVideo,
+                ] as [String: Any],
+                "audio": [
+                    "firstPTS_s": firstAudioPTS.isValid ? firstAudioPTS.seconds : -1,
+                    "lastPTS_s": lastAudioPTS.isValid ? lastAudioPTS.seconds : -1,
+                    "sampleCount": audioSamplesAppended,
+                    "bufferCount": audioBuffersAppended,
+                    "appendedCount": audioBuffersAppended,
+                    "droppedPreStart": droppedPreStartAudio,
+                    "droppedBackpressure": droppedBackpressureAudio,
+                    "convertedSampleRate": 48000,
+                ] as [String: Any],
+            ]
+
+            do {
+                let data = try JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys])
+                try data.write(to: jsonURL, options: .atomic)
+                logger.info("Sidecar JSON written: \(jsonURL.path, privacy: .public)")
+            } catch {
+                logger.error("Failed to write sidecar JSON: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 }
