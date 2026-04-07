@@ -6,7 +6,7 @@ import CoreMedia
 import Foundation
 import os
 
-private let logger = Logger(subsystem: "net.hakaru.OneTakeCamera", category: "Capture")
+private let logger = Logger(subsystem: "net.hakaru.OneTakeCamera", category: "MovieWriter")
 
 /// Writes a single MP4 recording to the app's Documents folder.
 /// Created fresh for each recording session.
@@ -16,6 +16,14 @@ final class MovieWriter: @unchecked Sendable {
 
     let outputURL: URL
     private(set) var isStarted = false
+
+    // MARK: - Diagnostic counters (accessed only from captureQueue)
+    private(set) var audioSamplesAppended: Int = 0
+    private(set) var videoFramesAppended: Int = 0
+    private(set) var firstAudioPTS: CMTime = .invalid
+    private(set) var lastAudioPTS: CMTime = .invalid
+    private(set) var firstVideoPTS: CMTime = .invalid
+    private(set) var lastVideoPTS: CMTime = .invalid
 
     // MARK: - Private
 
@@ -82,6 +90,10 @@ final class MovieWriter: @unchecked Sendable {
 
     func appendVideo(_ sampleBuffer: CMSampleBuffer) {
         guard isStarted, videoInput.isReadyForMoreMediaData else { return }
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        if firstVideoPTS == .invalid { firstVideoPTS = pts }
+        lastVideoPTS = pts
+        videoFramesAppended += 1
         videoInput.append(sampleBuffer)
     }
 
@@ -92,17 +104,44 @@ final class MovieWriter: @unchecked Sendable {
         guard audioInput.isReadyForMoreMediaData else {
             return false
         }
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        if firstAudioPTS == .invalid { firstAudioPTS = pts }
+        lastAudioPTS = pts
+        audioSamplesAppended += CMSampleBufferGetNumSamples(sampleBuffer)
         audioInput.append(sampleBuffer)
         return true
     }
 
     func finalize() async -> URL? {
         guard isStarted else { return nil }
+
+        // Log state before finalizing
+        logger.info("""
+            finalize() start — writerStatus=\(self.assetWriter.status.rawValue, privacy: .public) \
+            videoInput.expectsRealTime=\(self.videoInput.expectsMediaDataInRealTime, privacy: .public) \
+            videoInput.isReady=\(self.videoInput.isReadyForMoreMediaData, privacy: .public) \
+            audioInput.expectsRealTime=\(self.audioInput.expectsMediaDataInRealTime, privacy: .public) \
+            audioInput.isReady=\(self.audioInput.isReadyForMoreMediaData, privacy: .public)
+            """)
+        logger.info("""
+            PTS summary — \
+            firstVideo=\(self.firstVideoPTS.seconds, privacy: .public)s \
+            lastVideo=\(self.lastVideoPTS.seconds, privacy: .public)s \
+            firstAudio=\(self.firstAudioPTS.seconds, privacy: .public)s \
+            lastAudio=\(self.lastAudioPTS.seconds, privacy: .public)s \
+            videoFrames=\(self.videoFramesAppended, privacy: .public) \
+            audioSamples=\(self.audioSamplesAppended, privacy: .public)
+            """)
+
         isStarted = false
         videoInput.markAsFinished()
         audioInput.markAsFinished()
         await assetWriter.finishWriting()
-        if assetWriter.status == .completed {
+
+        let finalStatus = assetWriter.status
+        logger.info("finalize() end — writerStatus=\(finalStatus.rawValue, privacy: .public) error=\(self.assetWriter.error?.localizedDescription ?? "none", privacy: .public)")
+
+        if finalStatus == .completed {
             logger.info("MovieWriter finalized: \(self.outputURL.path, privacy: .public)")
             return outputURL
         } else {

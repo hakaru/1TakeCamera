@@ -165,8 +165,14 @@ final class SampleBufferConverter: @unchecked Sendable {
 
     // MARK: - Float32 stereo → CMSampleBuffer
 
-    /// Re-wrap a processed AVAudioPCMBuffer into a CMSampleBuffer,
-    /// stamping it with the original capture timing (PTS, duration, sample count).
+    /// Re-wrap a processed AVAudioPCMBuffer into a CMSampleBuffer.
+    ///
+    /// The original `timingInfo.presentationTimeStamp` is preserved as-is (PTS authority
+    /// comes from the capture clock). However, `duration` is recomputed from the
+    /// post-conversion frame count at the internal sample rate (48kHz), because
+    /// AVAudioConverter may change the sample count when doing sample-rate conversion
+    /// (e.g. 44100 mono → 48000 stereo). Using the original duration would introduce
+    /// accumulated drift proportional to the sample-rate ratio.
     func toCMSampleBuffer(
         _ pcmBuffer: AVAudioPCMBuffer,
         timingInfo: CMSampleTimingInfo
@@ -246,7 +252,16 @@ final class SampleBufferConverter: @unchecked Sendable {
             return nil
         }
 
-        var timingInfoCopy = timingInfo
+        // Recompute duration from the post-conversion frame count at 48kHz.
+        // PTS is preserved from the original capture timing.
+        var timingInfoCopy = CMSampleTimingInfo(
+            duration: CMTime(
+                value: CMTimeValue(frameCount),
+                timescale: CMTimeScale(Self.internalSampleRate)
+            ),
+            presentationTimeStamp: timingInfo.presentationTimeStamp,
+            decodeTimeStamp: timingInfo.decodeTimeStamp
+        )
         var outputSampleBuffer: CMSampleBuffer?
         let sbStatus = CMSampleBufferCreate(
             allocator: kCFAllocatorDefault,

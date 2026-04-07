@@ -46,6 +46,16 @@ final class CameraSession: NSObject, @unchecked Sendable {
     private var lastAudioPTS: CMTime = .invalid
     private var expectedAudioDuration: CMTime = .invalid
 
+    // Diagnostic counters (captureQueue only)
+    private var audioBufferCount = 0
+    private var videoFrameCount = 0
+    private var firstCaptureAudioPTS: CMTime = .invalid
+    private var firstCaptureVideoPTS: CMTime = .invalid
+
+    // Stop flag: set before drain so delegate ignores new buffers after drain
+    // Accessed from captureQueue only.
+    private var stopRequested = false
+
     // Countdown task (main actor)
     private var countdownTask: Task<Void, Never>?
 
@@ -107,17 +117,48 @@ final class CameraSession: NSObject, @unchecked Sendable {
         countdownTask?.cancel()
         countdownTask = nil
         notifyState(.finalizing)
+
+        // Step 1: Stop the capture session so AVFoundation stops producing new
+        // sample buffers. Pending delegate callbacks already enqueued on captureQueue
+        // will still execute before Step 3's async block, because captureQueue is serial.
         session.stopRunning()
         metrics.stopPeriodicLogging()
 
-        // Capture writer reference on captureQueue and finalize
+        // Step 2: Signal the capture queue to ignore any buffers that arrive between
+        // stopRunning() and when the drain block (Step 3) executes.
+        // Using async preserves FIFO ordering — this runs after any already-enqueued
+        // delegate callbacks, so in practice no new buffers should arrive, but the
+        // flag provides a safe guard.
+        captureQueue.async { [weak self] in
+            self?.stopRequested = true
+        }
+
+        // Step 3: Drain — any delegate callbacks that were already enqueued before
+        // stopRunning() will run before this async block executes, because captureQueue
+        // is serial (FIFO). After this returns, no more appendAudio/appendVideo calls
+        // will occur against the writer.
         let writer: MovieWriter? = await withCheckedContinuation { continuation in
             captureQueue.async { [weak self] in
-                let w = self?.movieWriter
-                self?.movieWriter = nil
-                self?.sessionStartPTS = .invalid
-                self?.lastAudioPTS = .invalid
-                self?.expectedAudioDuration = .invalid
+                guard let self else { continuation.resume(returning: nil); return }
+                let w = self.movieWriter
+                // Log final capture-side PTS before clearing state
+                logger.info("""
+                    captureSession drain complete — \
+                    firstCapAudio=\(self.firstCaptureAudioPTS.seconds, privacy: .public)s \
+                    lastCapAudio=\(self.lastAudioPTS.seconds, privacy: .public)s \
+                    firstCapVideo=\(self.firstCaptureVideoPTS.seconds, privacy: .public)s \
+                    audioBuffers=\(self.audioBufferCount, privacy: .public) \
+                    videoFrames=\(self.videoFrameCount, privacy: .public)
+                    """)
+                self.movieWriter = nil
+                self.sessionStartPTS = .invalid
+                self.lastAudioPTS = .invalid
+                self.expectedAudioDuration = .invalid
+                self.stopRequested = false
+                self.audioBufferCount = 0
+                self.videoFrameCount = 0
+                self.firstCaptureAudioPTS = .invalid
+                self.firstCaptureVideoPTS = .invalid
                 continuation.resume(returning: w)
             }
         }
@@ -216,7 +257,10 @@ extension CameraSession: AVCaptureVideoDataOutputSampleBufferDelegate,
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        guard let writer = movieWriter else { return }
+        // Guard against buffers arriving after stop was requested.
+        // stopRequested is set on captureQueue (same queue as this delegate),
+        // so there is no data race.
+        guard !stopRequested, let writer = movieWriter else { return }
 
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
@@ -224,11 +268,19 @@ extension CameraSession: AVCaptureVideoDataOutputSampleBufferDelegate,
             if !writer.isStarted {
                 writer.startSession(at: pts)
                 sessionStartPTS = pts
+                firstCaptureVideoPTS = pts
+            }
+            videoFrameCount += 1
+            if videoFrameCount % 150 == 0 {
+                logger.info("video[\(self.videoFrameCount, privacy: .public)] pts=\(pts.seconds, privacy: .public)s")
             }
             writer.appendVideo(sampleBuffer)
 
         } else {
             guard writer.isStarted else { return }
+
+            audioBufferCount += 1
+            if firstCaptureAudioPTS == .invalid { firstCaptureAudioPTS = pts }
 
             // PTS delta diagnostic
             if lastAudioPTS.isValid && expectedAudioDuration.isValid {
@@ -240,10 +292,14 @@ extension CameraSession: AVCaptureVideoDataOutputSampleBufferDelegate,
                 }
             }
 
-            // Preserve original timing
+            // Preserve original PTS (duration will be recomputed from converted frame count in toCMSampleBuffer)
             var timingInfo = CMSampleTimingInfo()
             CMSampleBufferGetSampleTimingInfo(sampleBuffer, at: 0, timingInfoOut: &timingInfo)
             let sampleCount = CMSampleBufferGetNumSamples(sampleBuffer)
+
+            if audioBufferCount % 50 == 0 {
+                logger.info("audio[\(self.audioBufferCount, privacy: .public)] pts=\(pts.seconds, privacy: .public)s samples=\(sampleCount, privacy: .public)")
+            }
 
             guard let pcmBuffer = converter.toFloat32Buffer(sampleBuffer) else {
                 metrics.droppedAudioBuffers += 1
