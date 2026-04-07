@@ -26,7 +26,7 @@ final class CameraSession: NSObject, @unchecked Sendable {
 
     enum State: Sendable {
         case idle
-        case recording(secondsRemaining: Int)
+        case recording
         case finalizing
         case done(url: URL)
         case failed(String)
@@ -65,9 +65,6 @@ final class CameraSession: NSObject, @unchecked Sendable {
     // Stop flag: set before drain so delegate ignores new buffers after drain
     // Accessed from captureQueue only.
     private var stopRequested = false
-
-    // Countdown task (main actor)
-    private var countdownTask: Task<Void, Never>?
 
     // Interruption + thermal monitors (live for the session lifetime)
     private var interruptionHandler: InterruptionHandler?
@@ -155,7 +152,7 @@ final class CameraSession: NSObject, @unchecked Sendable {
         return true
     }
 
-    func start30SecondRecording(preset: CompressorPreset = .studio) {
+    func beginRecording(preset: CompressorPreset = .studio) {
         let writer = MovieWriter(presetName: preset.displayName)
         guard let writer else {
             notifyState(.failed("Could not create output file"))
@@ -171,21 +168,14 @@ final class CameraSession: NSObject, @unchecked Sendable {
         if !session.isRunning {
             session.startRunning()
         }
+        notifyState(.recording)
+    }
 
-        countdownTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            for remaining in stride(from: 30, through: 1, by: -1) {
-                self.notifyState(.recording(secondsRemaining: remaining))
-                try? await Task.sleep(for: .seconds(1))
-                if Task.isCancelled { return }
-            }
-            await self.finalize()
-        }
+    func stopRecording() async {
+        await finalize()
     }
 
     func finalize() async {
-        countdownTask?.cancel()
-        countdownTask = nil
         notifyState(.finalizing)
 
         // Step 0: let the audio pipeline flush its tail buffers (~60ms capture latency).

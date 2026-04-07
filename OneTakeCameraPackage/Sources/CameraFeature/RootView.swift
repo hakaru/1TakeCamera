@@ -1,5 +1,5 @@
 // RootView.swift
-// v0.0 PoC UI — one big red button, 30-second recording, file path on completion.
+// v0.1 UI — manual start/stop recording with elapsed time counter.
 
 import SwiftUI
 
@@ -13,13 +13,17 @@ public struct RootView: View {
     @State private var levelMonitor = LevelMonitor()
     @State private var showRecordingList = false
 
+    // Elapsed time
+    @State private var recordingStartDate: Date? = nil
+    @State private var elapsedSeconds: Int = 0
+
     public init() {}
 
     // MARK: - View States
 
     enum ViewState {
         case idle
-        case recording(secondsRemaining: Int)
+        case recording
         case finalizing
         case done(url: URL)
         case failed(String)
@@ -42,9 +46,15 @@ public struct RootView: View {
 
     private var canTapButton: Bool {
         switch viewState {
-        case .idle, .done, .failed: return true
+        case .idle, .recording, .done, .failed: return true
         default: return false
         }
+    }
+
+    private var elapsedText: String {
+        let minutes = elapsedSeconds / 60
+        let seconds = elapsedSeconds % 60
+        return String(format: "%02d:%02d", minutes, seconds)
     }
 
     // MARK: - Body
@@ -123,7 +133,14 @@ public struct RootView: View {
         }
         .task {
             session.onStateChange = { newState in
-                viewState = newState.toViewState
+                let newViewState = newState.toViewState
+                viewState = newViewState
+                if case .recording = newViewState {
+                    recordingStartDate = Date()
+                    elapsedSeconds = 0
+                } else {
+                    recordingStartDate = nil
+                }
             }
             // Prewarm: configure session + start preview before user taps record.
             if CameraSession.isCameraAvailable {
@@ -137,6 +154,16 @@ public struct RootView: View {
                         clipReading: { [session] in session.currentAudioClipped() }
                     )
                 }
+            }
+        }
+        .task(id: isRecording) {
+            guard isRecording else { return }
+            // Update elapsed time every 100ms while recording.
+            while !Task.isCancelled {
+                if let start = recordingStartDate {
+                    elapsedSeconds = Int(Date().timeIntervalSince(start))
+                }
+                try? await Task.sleep(for: .milliseconds(100))
             }
         }
         .onDisappear {
@@ -153,8 +180,8 @@ public struct RootView: View {
             Text("Ready")
                 .font(.title2)
                 .foregroundStyle(.secondary)
-        case .recording(let remaining):
-            Text("\(remaining)s remaining")
+        case .recording:
+            Text(elapsedText)
                 .font(.largeTitle.monospacedDigit())
                 .foregroundStyle(.red)
         case .finalizing:
@@ -185,15 +212,19 @@ public struct RootView: View {
                 .overlay {
                     if case .finalizing = viewState {
                         ProgressView().tint(.white)
+                    } else if isRecording {
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.white)
+                            .frame(width: 28, height: 28)
                     } else {
-                        Image(systemName: isRecording ? "record.circle.fill" : "record.circle")
+                        Image(systemName: "record.circle")
                             .font(.title)
                             .foregroundStyle(.white)
                     }
                 }
         }
         .disabled(!canTapButton)
-        .accessibilityLabel(isRecording ? "Stop recording" : "Record 30 seconds")
+        .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
     }
 
     // MARK: - Actions
@@ -213,7 +244,9 @@ public struct RootView: View {
                         return
                     }
                 }
-                session.start30SecondRecording(preset: selectedPreset)
+                session.beginRecording(preset: selectedPreset)
+            case .recording:
+                await session.stopRecording()
             default:
                 break
             }
@@ -227,7 +260,7 @@ private extension CameraSession.State {
     var toViewState: RootView.ViewState {
         switch self {
         case .idle: return .idle
-        case .recording(let s): return .recording(secondsRemaining: s)
+        case .recording: return .recording
         case .finalizing: return .finalizing
         case .done(let url): return .done(url: url)
         case .failed(let msg): return .failed(msg)
