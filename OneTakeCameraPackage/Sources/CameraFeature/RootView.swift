@@ -13,6 +13,9 @@ public struct RootView: View {
     @State private var levelMonitor = LevelMonitor()
     @State private var showRecordingList = false
 
+    // Lens selection — mirrored from CameraSession after prewarm.
+    @State private var currentLensID: String = ""
+
     // Elapsed time
     @State private var recordingStartDate: Date? = nil
     @State private var elapsedSeconds: Int = 0
@@ -99,6 +102,8 @@ public struct RootView: View {
                 if !granted {
                     permissionDenied = true
                 } else {
+                    // Sync initial lens selection from session.
+                    currentLensID = session.currentLensID
                     // Start level meter now that audio is flowing.
                     levelMonitor.start(
                         reading: { [session] in session.currentAudioPeak() },
@@ -106,6 +111,9 @@ public struct RootView: View {
                     )
                 }
             }
+        }
+        .onChange(of: currentLensID) { _, newID in
+            session.switchLens(to: newID)
         }
         .task(id: isRecording) {
             guard isRecording else { return }
@@ -192,6 +200,15 @@ public struct RootView: View {
             LevelMeterView(peakDB: levelMonitor.peakDB)
                 .frame(height: 6)
                 .padding(.horizontal, 40)
+
+            // Lens selector — shown only when 2+ lenses are available.
+            if session.availableLenses.count > 1 {
+                LensSelectorView(
+                    lenses: session.availableLenses,
+                    selection: $currentLensID,
+                    isEnabled: isIdle
+                )
+            }
 
             // Preset selector.
             PresetSelectorView(selection: $selectedPreset, isEnabled: isIdle)

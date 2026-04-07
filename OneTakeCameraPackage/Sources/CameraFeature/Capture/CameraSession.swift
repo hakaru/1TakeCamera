@@ -10,6 +10,22 @@ import os
 
 private let logger = Logger(subsystem: "net.hakaru.OneTakeCamera", category: "Capture")
 
+// MARK: - LensOption
+
+/// A discovered rear camera lens. Stores only Sendable values; the actual
+/// AVCaptureDevice is looked up on demand by uniqueID to stay Sendable-safe
+/// under Swift 6 strict concurrency.
+struct LensOption: Identifiable, Hashable, Sendable {
+    let id: String                                   // == device.uniqueID
+    let deviceType: AVCaptureDevice.DeviceType
+    let displayName: String                          // "0.5x", "1x", "2x", etc.
+
+    static func == (lhs: LensOption, rhs: LensOption) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+}
+
+// MARK: - CameraSession
+
 /// Manages the AVCaptureSession lifecycle for the PoC.
 /// Internal state is protected by a dedicated serial capture queue.
 /// `onStateChange` is always called on the main actor.
@@ -34,6 +50,15 @@ final class CameraSession: NSObject, @unchecked Sendable {
 
     /// Called on main actor whenever state changes.
     var onStateChange: (@MainActor (State) -> Void)?
+
+    // MARK: - Lens selection (main-actor-readable; written on captureQueue via notifyLenses)
+
+    /// Available rear lenses discovered at session configuration time.
+    /// Empty on simulator or devices with a single rear camera.
+    private(set) var availableLenses: [LensOption] = []
+
+    /// The id of the currently active lens (matches a LensOption.id in availableLenses).
+    private(set) var currentLensID: String = ""
 
     // MARK: - Private — all accessed only from captureQueue
 
@@ -65,6 +90,10 @@ final class CameraSession: NSObject, @unchecked Sendable {
     // Stop flag: set before drain so delegate ignores new buffers after drain
     // Accessed from captureQueue only.
     private var stopRequested = false
+
+    // Current video input — kept so we can swap it during lens switching.
+    // Accessed from captureQueue only.
+    private var currentVideoInput: AVCaptureDeviceInput?
 
     // Interruption + thermal monitors (live for the session lifetime)
     private var interruptionHandler: InterruptionHandler?
@@ -175,6 +204,56 @@ final class CameraSession: NSObject, @unchecked Sendable {
         await finalize()
     }
 
+    /// Switch the active rear camera lens. No-op while recording.
+    /// Safe to call from any context — work is dispatched to captureQueue.
+    func switchLens(to id: String) {
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            // Don't swap lens while recording — AVCaptureSession input swap mid-write
+            // risks frame discontinuities and CMSampleBuffer ordering issues.
+            guard self.movieWriter == nil else {
+                logger.warning("switchLens ignored — recording in progress")
+                return
+            }
+            guard id != self.currentLensID else { return }
+
+            // Look up the target AVCaptureDevice by uniqueID.
+            guard let lens = self.availableLenses.first(where: { $0.id == id }),
+                  let device = AVCaptureDevice(uniqueID: lens.id),
+                  let newInput = try? AVCaptureDeviceInput(device: device) else {
+                logger.error("switchLens: could not create input for id=\(id, privacy: .public)")
+                return
+            }
+
+            self.session.beginConfiguration()
+            if let old = self.currentVideoInput {
+                self.session.removeInput(old)
+            }
+            if self.session.canAddInput(newInput) {
+                self.session.addInput(newInput)
+                self.currentVideoInput = newInput
+                let newID = lens.id
+                let newName = lens.displayName
+                self.session.commitConfiguration()
+                logger.info("switchLens → \(newName, privacy: .public) (\(newID, privacy: .public))")
+                // Notify UI on main actor.
+                let lenses = self.availableLenses
+                Task { @MainActor [weak self] in
+                    self?.availableLenses = lenses
+                    self?.currentLensID = newID
+                }
+            } else {
+                // Restore previous input on failure.
+                if let old = self.currentVideoInput,
+                   self.session.canAddInput(old) {
+                    self.session.addInput(old)
+                }
+                self.session.commitConfiguration()
+                logger.error("switchLens: canAddInput returned false for \(id, privacy: .public)")
+            }
+        }
+    }
+
     func finalize() async {
         notifyState(.finalizing)
 
@@ -255,19 +334,40 @@ final class CameraSession: NSObject, @unchecked Sendable {
             return false
         }
 
+        // Discover all available rear lenses.
+        let discoveredLenses = Self.discoverLenses()
+
+        // Pick initial device: prefer wide (1x), fall back to first available.
+        let initialLens = discoveredLenses.first(where: { $0.deviceType == .builtInWideAngleCamera })
+            ?? discoveredLenses.first
+
+        guard let initialLens,
+              let videoDevice = AVCaptureDevice(uniqueID: initialLens.id) else {
+            logger.error("No rear camera device available")
+            return false
+        }
+
         session.beginConfiguration()
         session.automaticallyConfiguresApplicationAudioSession = false
         session.sessionPreset = .hd1920x1080
 
-        // Rear camera
-        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-              let videoInput = try? AVCaptureDeviceInput(device: videoDevice),
+        // Rear camera (initial lens)
+        guard let videoInput = try? AVCaptureDeviceInput(device: videoDevice),
               session.canAddInput(videoInput) else {
             logger.error("Could not add rear camera input")
             session.commitConfiguration()
             return false
         }
         session.addInput(videoInput)
+        currentVideoInput = videoInput
+
+        // Publish lens list + current selection to main actor.
+        let lenses = discoveredLenses
+        let selectedID = initialLens.id
+        Task { @MainActor [weak self] in
+            self?.availableLenses = lenses
+            self?.currentLensID = selectedID
+        }
 
         // Built-in mic
         guard let audioDevice = AVCaptureDevice.default(for: .audio),
@@ -306,6 +406,57 @@ final class CameraSession: NSObject, @unchecked Sendable {
         session.commitConfiguration()
         logger.info("AVCaptureSession configured")
         return true
+    }
+
+    // MARK: - Lens Discovery
+
+    /// Queries AVCaptureDevice.DiscoverySession for all available rear lenses and
+    /// returns them sorted wide → ultra-wide → telephoto (i.e. 0.5x, 1x, 2x order).
+    private static func discoverLenses() -> [LensOption] {
+        let session = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [
+                .builtInUltraWideCamera,
+                .builtInWideAngleCamera,
+                .builtInTelephotoCamera
+            ],
+            mediaType: .video,
+            position: .back
+        )
+
+        // Build lens options with display labels.
+        let options: [LensOption] = session.devices.compactMap { device in
+            let displayName: String
+            switch device.deviceType {
+            case .builtInUltraWideCamera:
+                displayName = "0.5×"
+            case .builtInWideAngleCamera:
+                displayName = "1×"
+            case .builtInTelephotoCamera:
+                // Use the switch-over zoom factor to infer the telephoto magnification.
+                // virtualDeviceSwitchOverVideoZoomFactors contains the zoom factor at which
+                // the system transitions from wide to tele. On iPhone 13 Pro that's 3.0,
+                // on iPhone 14 Pro it's 3.0, on iPhone 15 Pro Max it's 5.0, etc.
+                if let switchFactor = device.virtualDeviceSwitchOverVideoZoomFactors.last {
+                    let factor = switchFactor.intValue
+                    displayName = "\(factor)×"
+                } else {
+                    displayName = "2×"
+                }
+            default:
+                return nil
+            }
+            return LensOption(id: device.uniqueID, deviceType: device.deviceType, displayName: displayName)
+        }
+
+        // Sort: ultra-wide (0.5×) first, then wide (1×), then telephoto.
+        let order: [AVCaptureDevice.DeviceType] = [
+            .builtInUltraWideCamera,
+            .builtInWideAngleCamera,
+            .builtInTelephotoCamera
+        ]
+        return options.sorted {
+            (order.firstIndex(of: $0.deviceType) ?? 99) < (order.firstIndex(of: $1.deviceType) ?? 99)
+        }
     }
 
     // MARK: - Helpers
