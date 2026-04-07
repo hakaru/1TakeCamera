@@ -260,6 +260,7 @@
 				DEVELOPMENT_TEAM = K38MBRNKAT;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "1Take Camera";
 				INFOPLIST_KEY_NSCameraUsageDescription = "1Take Camera records video using the rear camera.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "1Take Camera records professional-quality audio using the microphone.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "1Take Camera saves your recordings to your photo library when you choose to.";
@@ -295,6 +296,7 @@
 				DEVELOPMENT_TEAM = K38MBRNKAT;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "1Take Camera";
 				INFOPLIST_KEY_NSCameraUsageDescription = "1Take Camera records video using the rear camera.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "1Take Camera records professional-quality audio using the microphone.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "1Take Camera saves your recordings to your photo library when you choose to.";
