@@ -57,6 +57,10 @@ final class SampleBufferConverter: @unchecked Sendable {
 
     // MARK: - CMSampleBuffer → Float32 stereo
 
+    // Bypass flag: set once we confirm the capture format matches internal format.
+    // nil = not yet determined; true = bypass; false = must convert.
+    private var bypassConverter: Bool?
+
     /// Convert a capture CMSampleBuffer to an AVAudioPCMBuffer in internal format.
     /// Returns `nil` on failure; caller must drop the buffer and increment counter.
     func toFloat32Buffer(_ sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
@@ -75,6 +79,131 @@ final class SampleBufferConverter: @unchecked Sendable {
             return nil
         }
 
+        // Log capture format once, then decide bypass vs. convert path.
+        if bypassConverter == nil {
+            logger.info("""
+                capture format: sampleRate=\(asbd.mSampleRate, privacy: .public) \
+                channels=\(asbd.mChannelsPerFrame, privacy: .public) \
+                bitsPerChannel=\(asbd.mBitsPerChannel, privacy: .public) \
+                formatFlags=\(asbd.mFormatFlags, privacy: .public) \
+                formatID=\(asbd.mFormatID, privacy: .public) \
+                bytesPerFrame=\(asbd.mBytesPerFrame, privacy: .public) \
+                bytesPerPacket=\(asbd.mBytesPerPacket, privacy: .public) \
+                framesPerPacket=\(asbd.mFramesPerPacket, privacy: .public)
+                """)
+
+            // Conditions for bypass:
+            //   • Float32 PCM (kAudioFormatLinearPCM, kAudioFormatFlagIsFloat)
+            //   • Non-interleaved (kAudioFormatFlagIsNonInterleaved)
+            //   • 48 kHz
+            //   • 1 or 2 channels
+            let isFloat32     = asbd.mFormatID == kAudioFormatLinearPCM &&
+                                (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+            let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+            let is48k         = abs(asbd.mSampleRate - Self.internalSampleRate) < 1
+            let isBypassable  = isFloat32 && isNonInterleaved && is48k &&
+                                (asbd.mChannelsPerFrame == 1 || asbd.mChannelsPerFrame == 2)
+
+            bypassConverter = isBypassable
+            if isBypassable {
+                logger.info("SampleBufferConverter: AVAudioConverter BYPASSED (capture matches internal format, channels=\(asbd.mChannelsPerFrame, privacy: .public))")
+            } else {
+                logger.info("SampleBufferConverter: AVAudioConverter ACTIVE (format mismatch)")
+            }
+        }
+
+        let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard frameCount > 0 else { return nil }
+
+        // --- Bypass path -------------------------------------------------------
+        if bypassConverter == true {
+            return bypassToFloat32Buffer(
+                blockBuffer: blockBuffer,
+                asbd: asbd,
+                frameCount: frameCount
+            )
+        }
+
+        // --- AVAudioConverter path ---------------------------------------------
+        return convertToFloat32Buffer(
+            blockBuffer: blockBuffer,
+            asbd: asbd,
+            frameCount: frameCount
+        )
+    }
+
+    // MARK: - Bypass path (no AVAudioConverter)
+
+    /// Wraps capture Float32 non-interleaved data directly into an AVAudioPCMBuffer.
+    /// If mono, duplicates channel 0 into channel 1 (no mixing, no silence).
+    private func bypassToFloat32Buffer(
+        blockBuffer: CMBlockBuffer,
+        asbd: AudioStreamBasicDescription,
+        frameCount: AVAudioFrameCount
+    ) -> AVAudioPCMBuffer? {
+        guard let outputBuffer = AVAudioPCMBuffer(
+            pcmFormat: outputFormat,
+            frameCapacity: frameCount
+        ) else {
+            logger.error("[bypass] Failed to allocate output AVAudioPCMBuffer")
+            return nil
+        }
+        outputBuffer.frameLength = frameCount
+
+        guard let channelData = outputBuffer.floatChannelData else {
+            logger.error("[bypass] Output buffer has no floatChannelData")
+            return nil
+        }
+
+        // Non-interleaved: each channel is a separate contiguous plane.
+        // mBytesPerFrame == 4 (one Float32 per frame per channel).
+        let bytesPerChannel = Int(frameCount) * MemoryLayout<Float>.size
+        let captureChannels = Int(asbd.mChannelsPerFrame)
+
+        // Obtain a raw pointer to the block buffer data
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        var totalLength = 0
+        let bbStatus = CMBlockBufferGetDataPointer(
+            blockBuffer,
+            atOffset: 0,
+            lengthAtOffsetOut: nil,
+            totalLengthOut: &totalLength,
+            dataPointerOut: &dataPointer
+        )
+        guard bbStatus == kCMBlockBufferNoErr, let dataPointer else {
+            logger.error("[bypass] CMBlockBufferGetDataPointer failed: \(bbStatus, privacy: .public)")
+            return nil
+        }
+
+        let expectedBytes = bytesPerChannel * captureChannels
+        guard totalLength >= expectedBytes else {
+            logger.error("[bypass] Block buffer too small: \(totalLength) < \(expectedBytes)")
+            return nil
+        }
+
+        // Copy channel 0 (L)
+        let src0 = UnsafeRawPointer(dataPointer)
+        memcpy(channelData[0], src0, bytesPerChannel)
+
+        if captureChannels >= 2 {
+            // Stereo: copy channel 1 (R) from the second plane
+            let src1 = UnsafeRawPointer(dataPointer.advanced(by: bytesPerChannel))
+            memcpy(channelData[1], src1, bytesPerChannel)
+        } else {
+            // Mono: duplicate L → R
+            memcpy(channelData[1], src0, bytesPerChannel)
+        }
+
+        return outputBuffer
+    }
+
+    // MARK: - AVAudioConverter path
+
+    private func convertToFloat32Buffer(
+        blockBuffer: CMBlockBuffer,
+        asbd: AudioStreamBasicDescription,
+        frameCount: AVAudioFrameCount
+    ) -> AVAudioPCMBuffer? {
         // Build or reuse AVAudioConverter
         if inputFormat == nil || inputFormat?.streamDescription.pointee != asbd {
             var asbdCopy = asbd
@@ -91,9 +220,6 @@ final class SampleBufferConverter: @unchecked Sendable {
             logger.info("AVAudioConverter created: \(inFmt, privacy: .public) → \(self.outputFormat, privacy: .public)")
         }
         guard let converter else { return nil }
-
-        let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
-        guard frameCount > 0 else { return nil }
 
         // Compute output frame count for sample rate conversion
         let inputSampleRate = asbd.mSampleRate
