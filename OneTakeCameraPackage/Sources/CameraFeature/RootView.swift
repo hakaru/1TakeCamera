@@ -1,5 +1,5 @@
 // RootView.swift
-// v0.1 UI — manual start/stop recording with elapsed time counter.
+// Standard iOS Camera UI layout — full-bleed viewfinder, bottom control strip.
 
 import SwiftUI
 
@@ -61,67 +61,18 @@ public struct RootView: View {
 
     public var body: some View {
         ZStack {
-            // Background layer: viewfinder when camera is available, otherwise simulator placeholder.
-            if CameraSession.isCameraAvailable {
-                ViewfinderView(session: session.captureSession)
-                    .ignoresSafeArea()
-            } else {
-                Color.black.ignoresSafeArea()
-                VStack(spacing: 12) {
-                    Image(systemName: "video.slash")
-                        .font(.largeTitle)
-                    Text("Camera unavailable (simulator?)")
-                        .font(.callout)
-                        .multilineTextAlignment(.center)
-                }
-                .foregroundStyle(.white)
-            }
+            // Full-screen viewfinder or simulator placeholder.
+            backgroundLayer
+                .ignoresSafeArea()
 
-            // Clip warning overlay: full-screen red border when post-DSP peak > -1 dBFS.
-            ClipWarningOverlay(isVisible: levelMonitor.isClipping)
-
-            // Recordings list button — top-right overlay.
+            // Bottom control strip anchored to bottom.
             VStack {
-                HStack {
-                    Spacer()
-                    Button {
-                        showRecordingList = true
-                    } label: {
-                        Image(systemName: "list.bullet")
-                            .font(.title2)
-                            .foregroundStyle(.white)
-                            .padding(12)
-                            .background(.ultraThinMaterial, in: Circle())
-                    }
-                    .padding(.trailing, 16)
-                    .padding(.top, 16)
-                }
                 Spacer()
+                bottomControlStrip
             }
 
-            // Foreground layer: status + record button.
-            VStack(spacing: 32) {
-                Spacer()
-
-                statusText
-
-                LevelMeterView(peakDB: levelMonitor.peakDB)
-                    .padding(.horizontal, 24)
-
-                PresetSelectorView(selection: $selectedPreset, isEnabled: isIdle)
-
-                actionButton
-
-                if case .done(let url) = viewState {
-                    Text(url.lastPathComponent)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
-                }
-
-                Spacer()
-            }
+            // Clip warning overlay (top layer).
+            ClipWarningOverlay(isVisible: levelMonitor.isClipping)
         }
         .sheet(isPresented: $showRecordingList) {
             RecordingListView()
@@ -171,57 +122,147 @@ public struct RootView: View {
         }
     }
 
-    // MARK: - Subviews
+    // MARK: - Background Layer
 
     @ViewBuilder
-    private var statusText: some View {
-        switch viewState {
-        case .idle:
-            Text("Ready")
-                .font(.title2)
-                .foregroundStyle(.secondary)
-        case .recording:
-            Text(elapsedText)
-                .font(.largeTitle.monospacedDigit())
-                .foregroundStyle(.red)
-        case .finalizing:
-            Text("Finalizing…")
-                .font(.title2)
-                .foregroundStyle(.secondary)
-        case .done:
-            Text("Saved")
-                .font(.title2)
-                .foregroundStyle(.green)
-        case .failed(let message):
-            Text("Error: \(message)")
-                .font(.callout)
-                .foregroundStyle(.red)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal)
+    private var backgroundLayer: some View {
+        if CameraSession.isCameraAvailable {
+            ViewfinderView(session: session.captureSession)
+        } else {
+            Color.black
+            VStack(spacing: 12) {
+                Image(systemName: "video.slash")
+                    .font(.largeTitle)
+                Text("Camera unavailable (simulator?)")
+                    .font(.callout)
+                    .multilineTextAlignment(.center)
+            }
+            .foregroundStyle(.white)
         }
     }
 
+    // MARK: - Bottom Control Strip
+
+    private var bottomControlStrip: some View {
+        VStack(spacing: 12) {
+            // Top-left preset indicator pill (idle only)
+            HStack {
+                if isIdle {
+                    Text(selectedPreset.displayName)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.black.opacity(0.5))
+                        .clipShape(Capsule())
+                        .padding(.leading, 20)
+                }
+                Spacer()
+            }
+
+            // Elapsed time badge — visible only while recording.
+            if isRecording {
+                Text(elapsedText)
+                    .font(.system(size: 16, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Color.red.opacity(0.7))
+                    .cornerRadius(6)
+            }
+
+            // Status text for non-recording states.
+            if case .finalizing = viewState {
+                Text("Finalizing…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else if case .done = viewState {
+                Text("Saved")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.green)
+            } else if case .failed(let message) = viewState {
+                Text("Error: \(message)")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+            }
+
+            // Level meter.
+            LevelMeterView(peakDB: levelMonitor.peakDB)
+                .frame(height: 6)
+                .padding(.horizontal, 40)
+
+            // Preset selector.
+            PresetSelectorView(selection: $selectedPreset, isEnabled: isIdle)
+
+            // Button row: [spacer] [record button] [list button]
+            HStack(alignment: .center) {
+                // Balance spacer matching list button width.
+                Spacer().frame(width: 56)
+
+                Spacer()
+
+                recordButton
+
+                Spacer()
+
+                // Recordings list button.
+                Button {
+                    showRecordingList = true
+                } label: {
+                    Image(systemName: "list.bullet")
+                        .font(.title2)
+                        .foregroundStyle(.white)
+                        .frame(width: 56, height: 56)
+                        .background(Color.black.opacity(0.3))
+                        .clipShape(Circle())
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 30)
+        }
+        .padding(.top, 16)
+        .background(
+            LinearGradient(
+                colors: [.clear, Color.black.opacity(0.6)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea(edges: .bottom)
+        )
+    }
+
+    // MARK: - Record Button
+
     @ViewBuilder
-    private var actionButton: some View {
+    private var recordButton: some View {
         Button {
             handleButtonTap()
         } label: {
-            Circle()
-                .fill(isRecording ? Color.red.opacity(0.5) : Color.red)
-                .frame(width: 80, height: 80)
-                .overlay {
-                    if case .finalizing = viewState {
-                        ProgressView().tint(.white)
-                    } else if isRecording {
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.white)
-                            .frame(width: 28, height: 28)
-                    } else {
-                        Image(systemName: "record.circle")
-                            .font(.title)
-                            .foregroundStyle(.white)
-                    }
+            ZStack {
+                // Outer white ring — always visible.
+                Circle()
+                    .stroke(Color.white, lineWidth: 4)
+                    .frame(width: 80, height: 80)
+
+                if case .finalizing = viewState {
+                    // Spinner while file is being written.
+                    ProgressView()
+                        .tint(.white)
+                        .frame(width: 48, height: 48)
+                } else if isRecording {
+                    // Stop indicator: red rounded square.
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.red)
+                        .frame(width: 32, height: 32)
+                } else {
+                    // Idle: large red filled circle.
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 68, height: 68)
                 }
+            }
         }
         .disabled(!canTapButton)
         .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
