@@ -92,6 +92,11 @@ final class CameraSession: NSObject, @unchecked Sendable {
         processor.readPeakAndReset()
     }
 
+    /// Returns true if post-DSP audio exceeded -1 dBFS (0.891 linear) since last call; resets the flag.
+    func currentAudioClipped() -> Bool {
+        processor.readClippedAndReset()
+    }
+
     func requestPermissionsAndSetup() async -> Bool {
         let camStatus = await AVCaptureDevice.requestAccess(for: .video)
         guard camStatus else {

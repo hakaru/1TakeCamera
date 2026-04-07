@@ -66,6 +66,9 @@ public struct RootView: View {
                 .foregroundStyle(.white)
             }
 
+            // Clip warning overlay: full-screen red border when post-DSP peak > -1 dBFS.
+            ClipWarningOverlay(isVisible: levelMonitor.isClipping)
+
             // Foreground layer: status + record button.
             VStack(spacing: 32) {
                 Spacer()
@@ -106,7 +109,10 @@ public struct RootView: View {
                     permissionDenied = true
                 } else {
                     // Start level meter now that audio is flowing.
-                    levelMonitor.start(reading: { [session] in session.currentAudioPeak() })
+                    levelMonitor.start(
+                        reading: { [session] in session.currentAudioPeak() },
+                        clipReading: { [session] in session.currentAudioClipped() }
+                    )
                 }
             }
         }

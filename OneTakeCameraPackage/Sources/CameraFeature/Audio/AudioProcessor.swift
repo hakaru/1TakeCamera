@@ -15,6 +15,9 @@ final class AudioProcessor: @unchecked Sendable {
     // Thread-safe peak storage. Updated from captureQueue, read from any thread.
     private let peakLock = OSAllocatedUnfairLock<Float>(initialState: 0)
 
+    // Thread-safe clip flag. Set when post-DSP peak exceeds -1 dBFS (0.891 linear).
+    private let clipLock = OSAllocatedUnfairLock<Bool>(initialState: false)
+
     init(preset: CompressorPreset = .studio, sampleRate: Float = 48000) {
         self.preset = preset
         state.sampleRate = sampleRate
@@ -31,6 +34,15 @@ final class AudioProcessor: @unchecked Sendable {
         peakLock.withLock { peak in
             let v = peak
             peak = 0
+            return v
+        }
+    }
+
+    /// Returns true if clipping (> -1 dBFS) was observed since last call; resets the flag.
+    func readClippedAndReset() -> Bool {
+        clipLock.withLock { flag in
+            let v = flag
+            flag = false
             return v
         }
     }
@@ -61,5 +73,8 @@ final class AudioProcessor: @unchecked Sendable {
         }
         let combinedPeak = max(maxL, maxR)
         peakLock.withLock { $0 = max($0, combinedPeak) }
+        if combinedPeak > 0.891 {
+            clipLock.withLock { $0 = true }
+        }
     }
 }
