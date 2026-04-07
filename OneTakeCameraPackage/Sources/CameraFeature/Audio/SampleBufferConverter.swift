@@ -37,10 +37,10 @@ final class SampleBufferConverter: @unchecked Sendable {
         self.outputFormat = fmt
 
         var cmFmt: CMAudioFormatDescription?
-        let asbd = fmt.streamDescription.pointee
+        var asbd = fmt.streamDescription.pointee
         let status = CMAudioFormatDescriptionCreate(
             allocator: kCFAllocatorDefault,
-            asbd: &UnsafeMutablePointer(mutating: [asbd]).pointee,
+            asbd: &asbd,
             layoutSize: 0,
             layout: nil,
             magicCookieSize: 0,
@@ -77,7 +77,8 @@ final class SampleBufferConverter: @unchecked Sendable {
 
         // Build or reuse AVAudioConverter
         if inputFormat == nil || inputFormat?.streamDescription.pointee != asbd {
-            guard let inFmt = AVAudioFormat(streamDescription: &UnsafeMutablePointer(mutating: [asbd]).pointee) else {
+            var asbdCopy = asbd
+            guard let inFmt = AVAudioFormat(streamDescription: &asbdCopy) else {
                 logger.error("Failed to create AVAudioFormat from ASBD")
                 return nil
             }
@@ -193,7 +194,7 @@ final class SampleBufferConverter: @unchecked Sendable {
             flags: 0,
             blockBufferOut: &blockBuffer
         )
-        guard bbStatus == kCMBlockBufferNoErr, var blockBuffer else {
+        guard bbStatus == kCMBlockBufferNoErr, let blockBuffer else {
             logger.error("CMBlockBufferCreateWithMemoryBlock failed: \(bbStatus, privacy: .public)")
             return nil
         }
