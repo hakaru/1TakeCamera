@@ -94,8 +94,8 @@ final class MovieWriter: @unchecked Sendable {
 
     /// Feed a video buffer. The session is started automatically once both the first
     /// video and first audio buffer have been received (whichever arrives second
-    /// triggers `startSession`). Buffers that precede the session start time are
-    /// dropped so both streams begin at the exact same presentation time stamp.
+    /// triggers `startSession`). Both streams write their natural PTSs without
+    /// any pre-start dropping, preserving lip-sync.
     func appendVideo(_ sampleBuffer: CMSampleBuffer) {
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
@@ -110,12 +110,6 @@ final class MovieWriter: @unchecked Sendable {
             if !isStarted { return }
         }
 
-        // Drop any frames whose PTS is before the session start time
-        // (i.e., the video frames that arrived before audio came online).
-        guard CMTimeCompare(pts, sessionStartTime) >= 0 else {
-            droppedPreStartVideo += 1
-            return
-        }
         guard videoInput.isReadyForMoreMediaData else {
             droppedBackpressureVideo += 1
             return
@@ -143,11 +137,6 @@ final class MovieWriter: @unchecked Sendable {
             if !isStarted { return true }
         }
 
-        // Drop buffers whose PTS is before the session start time.
-        guard CMTimeCompare(pts, sessionStartTime) >= 0 else {
-            droppedPreStartAudio += 1
-            return true
-        }
         guard audioInput.isReadyForMoreMediaData else {
             droppedBackpressureAudio += 1
             return false
@@ -165,13 +154,16 @@ final class MovieWriter: @unchecked Sendable {
 
     /// Called from captureQueue whenever a new first-PTS is recorded.
     /// Starts the AVAssetWriter session only when both streams have delivered
-    /// at least one buffer, using `max(firstVideoPTS, firstAudioPTS)` so that
-    /// neither stream has a gap at the beginning.
+    /// at least one buffer, using `min(firstVideoPTS, firstAudioPTS)` — the
+    /// earlier of the two. This preserves lip-sync by letting each stream write
+    /// its natural PTSs without dropping leading buffers.
     private func tryStartSession() {
         guard pendingFirstVideoPTS != .invalid, pendingFirstAudioPTS != .invalid else { return }
 
-        // Use the *later* of the two start times so both streams have data.
-        let startPTS = CMTimeCompare(pendingFirstVideoPTS, pendingFirstAudioPTS) > 0
+        // Use the *earlier* of the two start times.  The stream that starts later
+        // will simply have a small gap at its head, which AVAssetWriter handles
+        // gracefully.  Neither stream drops buffers, so lip-sync is preserved.
+        let startPTS = CMTimeCompare(pendingFirstVideoPTS, pendingFirstAudioPTS) < 0
             ? pendingFirstVideoPTS
             : pendingFirstAudioPTS
 
