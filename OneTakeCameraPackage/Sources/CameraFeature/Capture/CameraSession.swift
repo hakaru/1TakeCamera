@@ -118,6 +118,11 @@ final class CameraSession: NSObject, @unchecked Sendable {
         countdownTask = nil
         notifyState(.finalizing)
 
+        // Step 0: let the audio pipeline flush its tail buffers (~60ms capture latency).
+        // Without this, stopRunning() cuts the last ~60ms of audio from the mic driver.
+        try? await Task.sleep(for: .milliseconds(200))
+        logger.info("tail-flush sleep complete")
+
         // Step 1: Stop the capture session so AVFoundation stops producing new
         // sample buffers. Pending delegate callbacks already enqueued on captureQueue
         // will still execute before Step 3's async block, because captureQueue is serial.
