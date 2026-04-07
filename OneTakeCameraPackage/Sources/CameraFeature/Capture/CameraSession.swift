@@ -265,9 +265,7 @@ extension CameraSession: AVCaptureVideoDataOutputSampleBufferDelegate,
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
         if output is AVCaptureVideoDataOutput {
-            if !writer.isStarted {
-                writer.startSession(at: pts)
-                sessionStartPTS = pts
+            if firstCaptureVideoPTS == .invalid {
                 firstCaptureVideoPTS = pts
             }
             videoFrameCount += 1
@@ -277,7 +275,6 @@ extension CameraSession: AVCaptureVideoDataOutputSampleBufferDelegate,
             writer.appendVideo(sampleBuffer)
 
         } else {
-            guard writer.isStarted else { return }
 
             audioBufferCount += 1
             if firstCaptureAudioPTS == .invalid { firstCaptureAudioPTS = pts }

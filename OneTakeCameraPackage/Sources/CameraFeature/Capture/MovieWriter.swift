@@ -15,7 +15,16 @@ final class MovieWriter: @unchecked Sendable {
     // MARK: - Public State
 
     let outputURL: URL
+    /// True once both streams have delivered their first buffer and startSession has been called.
     private(set) var isStarted = false
+
+    // MARK: - Startup synchronisation (accessed only from captureQueue)
+    /// PTS of the first video buffer received (before session start).
+    private var pendingFirstVideoPTS: CMTime = .invalid
+    /// PTS of the first audio buffer received (before session start).
+    private var pendingFirstAudioPTS: CMTime = .invalid
+    /// The source time passed to assetWriter.startSession; valid only after isStarted==true.
+    private var sessionStartTime: CMTime = .invalid
 
     // MARK: - Diagnostic counters (accessed only from captureQueue)
     private(set) var audioSamplesAppended: Int = 0
@@ -78,19 +87,29 @@ final class MovieWriter: @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    func startSession(at sourcePTS: CMTime) {
-        guard assetWriter.startWriting() else {
-            logger.error("AVAssetWriter failed to start: \(self.assetWriter.error?.localizedDescription ?? "unknown", privacy: .public)")
-            return
-        }
-        assetWriter.startSession(atSourceTime: sourcePTS)
-        isStarted = true
-        logger.info("MovieWriter session started at \(sourcePTS.seconds, privacy: .public)s → \(self.outputURL.lastPathComponent, privacy: .public)")
-    }
-
+    /// Feed a video buffer. The session is started automatically once both the first
+    /// video and first audio buffer have been received (whichever arrives second
+    /// triggers `startSession`). Buffers that precede the session start time are
+    /// dropped so both streams begin at the exact same presentation time stamp.
     func appendVideo(_ sampleBuffer: CMSampleBuffer) {
-        guard isStarted, videoInput.isReadyForMoreMediaData else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
+        if pendingFirstVideoPTS == .invalid {
+            pendingFirstVideoPTS = pts
+            logger.info("First video PTS: \(pts.seconds, privacy: .public)s")
+        }
+
+        if !isStarted {
+            tryStartSession()
+            // Still not started (audio hasn't arrived yet) — drop this frame.
+            if !isStarted { return }
+        }
+
+        // Drop any frames whose PTS is before the session start time
+        // (i.e., the video frames that arrived before audio came online).
+        guard CMTimeCompare(pts, sessionStartTime) >= 0 else { return }
+        guard videoInput.isReadyForMoreMediaData else { return }
+
         if firstVideoPTS == .invalid { firstVideoPTS = pts }
         lastVideoPTS = pts
         videoFramesAppended += 1
@@ -100,16 +119,60 @@ final class MovieWriter: @unchecked Sendable {
     /// Returns false if the writer is under backpressure (caller increments counter).
     @discardableResult
     func appendAudio(_ sampleBuffer: CMSampleBuffer) -> Bool {
-        guard isStarted else { return true }
-        guard audioInput.isReadyForMoreMediaData else {
-            return false
-        }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
+        if pendingFirstAudioPTS == .invalid {
+            pendingFirstAudioPTS = pts
+            logger.info("First audio PTS: \(pts.seconds, privacy: .public)s")
+        }
+
+        if !isStarted {
+            tryStartSession()
+            // Still not started (video hasn't arrived yet) — drop this buffer.
+            if !isStarted { return true }
+        }
+
+        // Drop buffers whose PTS is before the session start time.
+        guard CMTimeCompare(pts, sessionStartTime) >= 0 else { return true }
+        guard audioInput.isReadyForMoreMediaData else { return false }
+
         if firstAudioPTS == .invalid { firstAudioPTS = pts }
         lastAudioPTS = pts
         audioSamplesAppended += CMSampleBufferGetNumSamples(sampleBuffer)
         audioInput.append(sampleBuffer)
         return true
+    }
+
+    // MARK: - Private
+
+    /// Called from captureQueue whenever a new first-PTS is recorded.
+    /// Starts the AVAssetWriter session only when both streams have delivered
+    /// at least one buffer, using `max(firstVideoPTS, firstAudioPTS)` so that
+    /// neither stream has a gap at the beginning.
+    private func tryStartSession() {
+        guard pendingFirstVideoPTS != .invalid, pendingFirstAudioPTS != .invalid else { return }
+
+        // Use the *later* of the two start times so both streams have data.
+        let startPTS = CMTimeCompare(pendingFirstVideoPTS, pendingFirstAudioPTS) > 0
+            ? pendingFirstVideoPTS
+            : pendingFirstAudioPTS
+
+        guard assetWriter.startWriting() else {
+            logger.error("AVAssetWriter failed to start: \(self.assetWriter.error?.localizedDescription ?? "unknown", privacy: .public)")
+            return
+        }
+        assetWriter.startSession(atSourceTime: startPTS)
+        sessionStartTime = startPTS
+        isStarted = true
+
+        let driftMs = (pendingFirstVideoPTS.seconds - pendingFirstAudioPTS.seconds) * 1000
+        logger.info("""
+            startSession atSourceTime=\(startPTS.seconds, privacy: .public)s \
+            (video=\(self.pendingFirstVideoPTS.seconds, privacy: .public)s, \
+            audio=\(self.pendingFirstAudioPTS.seconds, privacy: .public)s, \
+            startup_drift=\(driftMs, privacy: .public)ms) \
+            → \(self.outputURL.lastPathComponent, privacy: .public)
+            """)
     }
 
     func finalize() async -> URL? {
