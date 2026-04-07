@@ -2,6 +2,16 @@
 
 All notable changes to 1Take Camera will be documented in this file.
 
+## [0.1.1] - 2026-04-07 (unreleased)
+
+Post-MVP polish.
+
+### Added
+- **Manual start/stop recording** — no more 30-second fixed length; tap the record button to start, tap again to stop. Elapsed time counter (`MM:SS`) shown in a red badge during recording.
+- **Standard iOS-camera UI layout** — full-bleed viewfinder, bottom control strip with gradient scrim, large centered shutter button (white ring + red fill / red rounded-square), recording list button on the right, preset indicator pill top-left.
+- **Lens selector** — ultra-wide / wide / telephoto pills. Detects available cameras via `AVCaptureDevice.DiscoverySession` and switches `AVCaptureSession` input on tap. Disabled during recording.
+- **1Take-style app icon** — dark background, "1Take" + red "CAM" badge, camera lens iris motif, red record dot.
+
 ## [0.1.0] - 2026-04-07
 
 First MVP. Full recording loop with real-time audio DSP on iPhone.
