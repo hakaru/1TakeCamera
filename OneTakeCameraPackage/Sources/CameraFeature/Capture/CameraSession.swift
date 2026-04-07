@@ -69,6 +69,10 @@ final class CameraSession: NSObject, @unchecked Sendable {
     // Countdown task (main actor)
     private var countdownTask: Task<Void, Never>?
 
+    // Interruption + thermal monitors (live for the session lifetime)
+    private var interruptionHandler: InterruptionHandler?
+    private let thermalMonitor = ThermalMonitor()
+
     // MARK: - Init
 
     override init() {
@@ -82,6 +86,11 @@ final class CameraSession: NSObject, @unchecked Sendable {
             qos: .utility
         ))
         super.init()
+    }
+
+    deinit {
+        interruptionHandler?.stop()
+        thermalMonitor.stop()
     }
 
     // MARK: - Public API (called from @MainActor)
@@ -121,6 +130,28 @@ final class CameraSession: NSObject, @unchecked Sendable {
             session.startRunning()
             logger.info("CameraSession prewarmed — preview running")
         }
+
+        // Start interruption handler (keep running for session lifetime; only triggers
+        // finalize when recording is active — checked inside the closure via captureQueue).
+        if interruptionHandler == nil {
+            let handler = InterruptionHandler(session: session) { [weak self] in
+                guard let self else { return }
+                // Only finalize if actively recording. captureQueue.sync is safe here
+                // because this closure is called from a NotificationCenter queue, not captureQueue.
+                var isRecording = false
+                self.captureQueue.sync { isRecording = self.movieWriter != nil }
+                guard isRecording else {
+                    logger.info("Interruption received but not recording — ignored")
+                    return
+                }
+                Task { await self.finalize() }
+            }
+            handler.start()
+            interruptionHandler = handler
+        }
+
+        thermalMonitor.start()
+
         return true
     }
 
