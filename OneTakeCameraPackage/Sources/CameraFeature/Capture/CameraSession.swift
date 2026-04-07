@@ -15,6 +15,13 @@ private let logger = Logger(subsystem: "net.hakaru.OneTakeCamera", category: "Ca
 /// `onStateChange` is always called on the main actor.
 final class CameraSession: NSObject, @unchecked Sendable {
 
+    // MARK: - Static helpers
+
+    /// Returns true when a rear wide-angle camera is available (false on simulator).
+    static var isCameraAvailable: Bool {
+        AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) != nil
+    }
+
     // MARK: - Capture State
 
     enum State: Sendable {
@@ -36,6 +43,9 @@ final class CameraSession: NSObject, @unchecked Sendable {
     )
 
     private let session = AVCaptureSession()
+
+    /// Exposes the underlying AVCaptureSession for preview layer binding.
+    var captureSession: AVCaptureSession { session }
     private var movieWriter: MovieWriter?
     private let converter: SampleBufferConverter
     private let processor: AudioProcessor
@@ -90,6 +100,19 @@ final class CameraSession: NSObject, @unchecked Sendable {
         return configureSession()
     }
 
+    /// Configures the session (if not already configured) and starts running so the
+    /// viewfinder shows a live preview before recording begins.
+    /// Does NOT attach a MovieWriter — call `start30SecondRecording()` to begin capture.
+    func prewarm() async -> Bool {
+        let granted = await requestPermissionsAndSetup()
+        guard granted else { return false }
+        if !session.isRunning {
+            session.startRunning()
+            logger.info("CameraSession prewarmed — preview running")
+        }
+        return true
+    }
+
     func start30SecondRecording() {
         let writer = MovieWriter()
         guard let writer else {
@@ -100,7 +123,10 @@ final class CameraSession: NSObject, @unchecked Sendable {
             self?.movieWriter = writer
         }
         metrics.startPeriodicLogging()
-        session.startRunning()
+        // Session may already be running from prewarm(); startRunning() is a no-op when running.
+        if !session.isRunning {
+            session.startRunning()
+        }
 
         countdownTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -128,6 +154,7 @@ final class CameraSession: NSObject, @unchecked Sendable {
         // will still execute before Step 3's async block, because captureQueue is serial.
         session.stopRunning()
         metrics.stopPeriodicLogging()
+        // Note: session is restarted after finalize() to keep the viewfinder alive.
 
         // Step 2: Signal the capture queue to ignore any buffers that arrive between
         // stopRunning() and when the drain block (Step 3) executes.
@@ -169,6 +196,11 @@ final class CameraSession: NSObject, @unchecked Sendable {
         }
 
         let url = await writer?.finalize()
+
+        // Restart session so viewfinder stays live after recording ends.
+        session.startRunning()
+        logger.info("CameraSession restarted after finalize — preview resumed")
+
         if let url {
             notifyState(.done(url: url))
         } else {

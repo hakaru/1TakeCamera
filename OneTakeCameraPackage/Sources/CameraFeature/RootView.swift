@@ -40,8 +40,23 @@ public struct RootView: View {
 
     public var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            // Background layer: viewfinder when camera is available, otherwise simulator placeholder.
+            if CameraSession.isCameraAvailable {
+                ViewfinderView(session: session.captureSession)
+                    .ignoresSafeArea()
+            } else {
+                Color.black.ignoresSafeArea()
+                VStack(spacing: 12) {
+                    Image(systemName: "video.slash")
+                        .font(.largeTitle)
+                    Text("Camera unavailable (simulator?)")
+                        .font(.callout)
+                        .multilineTextAlignment(.center)
+                }
+                .foregroundStyle(.white)
+            }
 
+            // Foreground layer: status + record button.
             VStack(spacing: 32) {
                 Spacer()
 
@@ -68,6 +83,13 @@ public struct RootView: View {
         .task {
             session.onStateChange = { newState in
                 viewState = newState.toViewState
+            }
+            // Prewarm: configure session + start preview before user taps record.
+            if CameraSession.isCameraAvailable {
+                let granted = await session.prewarm()
+                if !granted {
+                    permissionDenied = true
+                }
             }
         }
     }
@@ -131,10 +153,15 @@ public struct RootView: View {
             switch viewState {
             case .idle, .done, .failed:
                 viewState = .idle
-                let granted = await session.requestPermissionsAndSetup()
-                guard granted else {
-                    permissionDenied = true
-                    return
+                // Session should already be running from prewarm() in .task.
+                // If camera is unavailable (simulator), skip setup and start directly
+                // so the state machine still works for testing.
+                if CameraSession.isCameraAvailable && !session.captureSession.isRunning {
+                    let granted = await session.prewarm()
+                    guard granted else {
+                        permissionDenied = true
+                        return
+                    }
                 }
                 session.start30SecondRecording()
             default:
