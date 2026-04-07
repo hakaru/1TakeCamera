@@ -86,6 +86,12 @@ final class CameraSession: NSObject, @unchecked Sendable {
 
     // MARK: - Public API (called from @MainActor)
 
+    /// Returns the post-DSP peak linear amplitude since the last call (thread-safe).
+    /// Readable at any time — even before recording starts (during prewarm preview).
+    func currentAudioPeak() -> Float {
+        processor.readPeakAndReset()
+    }
+
     func requestPermissionsAndSetup() async -> Bool {
         let camStatus = await AVCaptureDevice.requestAccess(for: .video)
         guard camStatus else {

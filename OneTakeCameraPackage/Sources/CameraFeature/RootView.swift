@@ -10,6 +10,7 @@ public struct RootView: View {
     @State private var viewState: ViewState = .idle
     @State private var permissionDenied = false
     @State private var selectedPreset: CompressorPreset = .studio
+    @State private var levelMonitor = LevelMonitor()
 
     public init() {}
 
@@ -71,6 +72,9 @@ public struct RootView: View {
 
                 statusText
 
+                LevelMeterView(peakDB: levelMonitor.peakDB)
+                    .padding(.horizontal, 24)
+
                 PresetSelectorView(selection: $selectedPreset, isEnabled: isIdle)
 
                 actionButton
@@ -100,8 +104,14 @@ public struct RootView: View {
                 let granted = await session.prewarm()
                 if !granted {
                     permissionDenied = true
+                } else {
+                    // Start level meter now that audio is flowing.
+                    levelMonitor.start(reading: { [session] in session.currentAudioPeak() })
                 }
             }
+        }
+        .onDisappear {
+            levelMonitor.stop()
         }
     }
 
