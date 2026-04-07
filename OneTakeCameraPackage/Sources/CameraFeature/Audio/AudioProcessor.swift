@@ -5,13 +5,21 @@ import Foundation
 import OneTakeDSPCore
 import OneTakeDSPPresets
 
-/// Applies the hardcoded LA-2A compressor preset to Float32 stereo buffers.
+/// Applies a compressor preset to Float32 stereo buffers.
 /// Called from the capture serial queue — not thread-safe on its own.
-final class AudioProcessor {
+final class AudioProcessor: @unchecked Sendable {
+    private var preset: CompressorPreset
     private var state = CompressorState()
 
-    init(sampleRate: Float = 48000) {
+    init(preset: CompressorPreset = .studio, sampleRate: Float = 48000) {
+        self.preset = preset
         state.sampleRate = sampleRate
+    }
+
+    /// Switch to a new preset and reset the compressor envelope history.
+    func setPreset(_ new: CompressorPreset) {
+        preset = new
+        state = CompressorState()
     }
 
     /// Process audio in-place. `left` and `right` must each have `frameCount` samples.
@@ -24,8 +32,8 @@ final class AudioProcessor {
             left: left,
             right: right,
             frameCount: frameCount,
-            settings: .studioLight,
-            model: .opto,
+            settings: preset.settings,
+            model: preset.model,
             state: &state
         )
     }

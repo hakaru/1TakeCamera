@@ -9,6 +9,7 @@ public struct RootView: View {
     @State private var session = CameraSession()
     @State private var viewState: ViewState = .idle
     @State private var permissionDenied = false
+    @State private var selectedPreset: CompressorPreset = .studio
 
     public init() {}
 
@@ -27,6 +28,14 @@ public struct RootView: View {
     private var isRecording: Bool {
         if case .recording = viewState { return true }
         return false
+    }
+
+    /// True when the preset selector should be interactive (not mid-recording or finalizing).
+    private var isIdle: Bool {
+        switch viewState {
+        case .idle, .done, .failed: return true
+        default: return false
+        }
     }
 
     private var canTapButton: Bool {
@@ -61,6 +70,8 @@ public struct RootView: View {
                 Spacer()
 
                 statusText
+
+                PresetSelectorView(selection: $selectedPreset, isEnabled: isIdle)
 
                 actionButton
 
@@ -163,7 +174,7 @@ public struct RootView: View {
                         return
                     }
                 }
-                session.start30SecondRecording()
+                session.start30SecondRecording(preset: selectedPreset)
             default:
                 break
             }

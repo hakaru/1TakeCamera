@@ -113,14 +113,16 @@ final class CameraSession: NSObject, @unchecked Sendable {
         return true
     }
 
-    func start30SecondRecording() {
-        let writer = MovieWriter()
+    func start30SecondRecording(preset: CompressorPreset = .studio) {
+        let writer = MovieWriter(presetName: preset.displayName)
         guard let writer else {
             notifyState(.failed("Could not create output file"))
             return
         }
         captureQueue.async { [weak self] in
-            self?.movieWriter = writer
+            guard let self else { return }
+            self.processor.setPreset(preset)
+            self.movieWriter = writer
         }
         metrics.startPeriodicLogging()
         // Session may already be running from prewarm(); startRunning() is a no-op when running.

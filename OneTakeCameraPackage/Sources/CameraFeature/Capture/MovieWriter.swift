@@ -47,7 +47,7 @@ final class MovieWriter: @unchecked Sendable {
 
     // MARK: - Init
 
-    init?(videoSize: CGSize = CGSize(width: 1920, height: 1080)) {
+    init?(videoSize: CGSize = CGSize(width: 1920, height: 1080), presetName: String = "Studio") {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
@@ -60,6 +60,13 @@ final class MovieWriter: @unchecked Sendable {
         }
         self.outputURL = url
         self.assetWriter = writer
+
+        // Embed preset name in MP4 software metadata
+        let meta = AVMutableMetadataItem()
+        meta.identifier = .commonIdentifierSoftware
+        meta.value = "1Take Camera (\(presetName))" as NSString
+        meta.extendedLanguageTag = "und"
+        writer.metadata = [meta]
 
         // Video input: H.264, 1080p30
         let videoSettings: [String: Any] = [
