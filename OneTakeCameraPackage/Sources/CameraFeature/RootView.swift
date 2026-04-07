@@ -1,0 +1,159 @@
+// RootView.swift
+// v0.0 PoC UI — one big red button, 30-second recording, file path on completion.
+
+import SwiftUI
+
+@MainActor
+public struct RootView: View {
+
+    @State private var session = CameraSession()
+    @State private var viewState: ViewState = .idle
+    @State private var permissionDenied = false
+
+    public init() {}
+
+    // MARK: - View States
+
+    enum ViewState {
+        case idle
+        case recording(secondsRemaining: Int)
+        case finalizing
+        case done(url: URL)
+        case failed(String)
+    }
+
+    // MARK: - Computed helpers (outside @ViewBuilder)
+
+    private var isRecording: Bool {
+        if case .recording = viewState { return true }
+        return false
+    }
+
+    private var canTapButton: Bool {
+        switch viewState {
+        case .idle, .done, .failed: return true
+        default: return false
+        }
+    }
+
+    // MARK: - Body
+
+    public var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            VStack(spacing: 32) {
+                Spacer()
+
+                statusText
+
+                actionButton
+
+                if case .done(let url) = viewState {
+                    Text(url.lastPathComponent)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
+
+                Spacer()
+            }
+        }
+        .alert("Permission Denied", isPresented: $permissionDenied) {
+            Button("OK") {}
+        } message: {
+            Text("Camera and microphone access are required. Enable them in Settings.")
+        }
+        .task {
+            session.onStateChange = { newState in
+                viewState = newState.toViewState
+            }
+        }
+    }
+
+    // MARK: - Subviews
+
+    @ViewBuilder
+    private var statusText: some View {
+        switch viewState {
+        case .idle:
+            Text("Ready")
+                .font(.title2)
+                .foregroundStyle(.secondary)
+        case .recording(let remaining):
+            Text("\(remaining)s remaining")
+                .font(.largeTitle.monospacedDigit())
+                .foregroundStyle(.red)
+        case .finalizing:
+            Text("Finalizing…")
+                .font(.title2)
+                .foregroundStyle(.secondary)
+        case .done:
+            Text("Saved")
+                .font(.title2)
+                .foregroundStyle(.green)
+        case .failed(let message):
+            Text("Error: \(message)")
+                .font(.callout)
+                .foregroundStyle(.red)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+        }
+    }
+
+    @ViewBuilder
+    private var actionButton: some View {
+        Button {
+            handleButtonTap()
+        } label: {
+            Circle()
+                .fill(isRecording ? Color.red.opacity(0.5) : Color.red)
+                .frame(width: 80, height: 80)
+                .overlay {
+                    if case .finalizing = viewState {
+                        ProgressView().tint(.white)
+                    } else {
+                        Image(systemName: isRecording ? "record.circle.fill" : "record.circle")
+                            .font(.title)
+                            .foregroundStyle(.white)
+                    }
+                }
+        }
+        .disabled(!canTapButton)
+        .accessibilityLabel(isRecording ? "Stop recording" : "Record 30 seconds")
+    }
+
+    // MARK: - Actions
+
+    private func handleButtonTap() {
+        Task { @MainActor in
+            switch viewState {
+            case .idle, .done, .failed:
+                viewState = .idle
+                let granted = await session.requestPermissionsAndSetup()
+                guard granted else {
+                    permissionDenied = true
+                    return
+                }
+                session.start30SecondRecording()
+            default:
+                break
+            }
+        }
+    }
+}
+
+// MARK: - Mapping CameraSession.State → ViewState
+
+private extension CameraSession.State {
+    var toViewState: RootView.ViewState {
+        switch self {
+        case .idle: return .idle
+        case .recording(let s): return .recording(secondsRemaining: s)
+        case .finalizing: return .finalizing
+        case .done(let url): return .done(url: url)
+        case .failed(let msg): return .failed(msg)
+        }
+    }
+}
