@@ -1,0 +1,15 @@
+{
+  "originHash" : "ce0fafb524366ba3fbe834ac8d9f1affd4ac8666bb63d9dfe714098b56e6e5a8",
+  "pins" : [
+    {
+      "identity" : "swift-lame",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Phisto/swift-lame.git",
+      "state" : {
+        "revision" : "d85ee80128d7cc36796c984463cfd75b1d38587d",
+        "version" : "3.100.0"
+      }
+    }
+  ],
+  "version" : 3
+}
