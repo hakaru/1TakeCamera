@@ -11,6 +11,7 @@ public struct RootView: View {
     @State private var permissionDenied = false
     @State private var selectedPreset: CompressorPreset = .studio
     @State private var levelMonitor = LevelMonitor()
+    @State private var showRecordingList = false
 
     public init() {}
 
@@ -69,6 +70,25 @@ public struct RootView: View {
             // Clip warning overlay: full-screen red border when post-DSP peak > -1 dBFS.
             ClipWarningOverlay(isVisible: levelMonitor.isClipping)
 
+            // Recordings list button — top-right overlay.
+            VStack {
+                HStack {
+                    Spacer()
+                    Button {
+                        showRecordingList = true
+                    } label: {
+                        Image(systemName: "list.bullet")
+                            .font(.title2)
+                            .foregroundStyle(.white)
+                            .padding(12)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    .padding(.trailing, 16)
+                    .padding(.top, 16)
+                }
+                Spacer()
+            }
+
             // Foreground layer: status + record button.
             VStack(spacing: 32) {
                 Spacer()
@@ -92,6 +112,9 @@ public struct RootView: View {
 
                 Spacer()
             }
+        }
+        .sheet(isPresented: $showRecordingList) {
+            RecordingListView()
         }
         .alert("Permission Denied", isPresented: $permissionDenied) {
             Button("OK") {}
