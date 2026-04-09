@@ -1,24 +1,14 @@
 // RemoteControlService.swift
 // Thin PeerClock wrapper for 1Take Camera.
-// Provides: clock sync, remote start/stop, status broadcast.
+// Provides: clock sync, remote start/stop, unified DeviceStatus broadcast.
 
 import Foundation
 import PeerClock
+import MultiDeviceCoordinator
 import Observation
 import os
 
 private let logger = Logger(subsystem: "net.hakaru.OneTakeCamera", category: "Remote")
-
-// MARK: - RemoteStatus
-
-/// App-level status broadcast to all peers.
-public struct RemoteStatus: Codable, Sendable {
-    /// "idle" | "recording" | "finalizing"
-    public let state: String
-    public let presetID: String
-    public let elapsedSeconds: Int
-    public let latestFilename: String?
-}
 
 // MARK: - Command type constants
 
@@ -52,19 +42,24 @@ public final class RemoteControlService {
     // MARK: - Handlers (set by RootView)
 
     /// Called when a peer requests recording start with a given preset.
-    public var onRemoteStartRequest: (@Sendable (CompressorPreset) -> Void)?
+    /// Receives nil when no preset is specified — caller should use its own selection.
+    public var onRemoteStartRequest: (@Sendable (CompressorPreset?) -> Void)?
 
     /// Called when a peer requests recording stop.
     public var onRemoteStopRequest: (@Sendable () -> Void)?
 
     /// Returns current app status for broadcast. Called on MainActor.
-    public var currentStatusProvider: (@MainActor () -> RemoteStatus)?
+    public var currentStatusProvider: (@MainActor () -> DeviceStatus)?
 
     // MARK: - Private
 
     /// Exposed for CameraSession timecode injection. Available after `start()` is called.
     private(set) var peerClock: PeerClock?
     private var streamTasks: [Task<Void, Never>] = []
+
+    /// Heartbeat timer task — runs every 5s while recording.
+    /// Known limitation: backgrounding may delay the timer (MVP).
+    private var heartbeatTask: Task<Void, Never>?
 
     // MARK: - Init
 
@@ -141,6 +136,7 @@ public final class RemoteControlService {
     public func stop() {
         streamTasks.forEach { $0.cancel() }
         streamTasks = []
+        stopHeartbeat()
 
         let pc = peerClock
         peerClock = nil
@@ -154,16 +150,37 @@ public final class RemoteControlService {
     }
 
     /// Push current app status to all peers via PeerClock status registry.
+    /// Key: "net.hakaru.1take.status" (unified schema with 1Take).
     public func publishStatusUpdate() {
         guard let pc = peerClock, let provider = currentStatusProvider else { return }
         let status = provider()
         Task {
             do {
-                try await pc.setStatus(status, forKey: "net.hakaru.1take.camera.status")
+                try await pc.setStatus(status, forKey: DeviceStatus.statusKey)
             } catch {
                 logger.error("publishStatusUpdate failed: \(error)")
             }
         }
+    }
+
+    // MARK: - Heartbeat timer
+
+    /// Start 5-second heartbeat timer while recording.
+    public func startHeartbeat() {
+        stopHeartbeat()
+        heartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled else { break }
+                await self?.publishStatusUpdate()
+            }
+        }
+    }
+
+    /// Stop heartbeat timer (call when recording ends or app stops).
+    public func stopHeartbeat() {
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
     }
 
     // MARK: - Private
@@ -172,11 +189,14 @@ public final class RemoteControlService {
         switch command.type {
         case CommandType.startRecording, CommandType.legacyStart:
             let preset = decodePreset(from: command.payload)
-            logger.info("Remote start request: preset=\(preset.rawValue)")
+            logger.info("Remote start request: preset=\(preset?.rawValue ?? "nil (use own)")")
+            // Publish finalizing state will happen via onRemoteStartRequest handler in RootView
             onRemoteStartRequest?(preset)
 
         case CommandType.stopRecording, CommandType.legacyStop:
             logger.info("Remote stop request")
+            // Publish finalizing status immediately before the stop handler runs
+            publishStatusUpdate()
             onRemoteStopRequest?()
 
         default:
@@ -184,12 +204,14 @@ public final class RemoteControlService {
         }
     }
 
-    private func decodePreset(from payload: Data) -> CompressorPreset {
+    /// Decode preset from JSON payload. Returns nil when payload is empty or missing —
+    /// caller should use the device's currently selected preset (do NOT fall back to "studio").
+    private func decodePreset(from payload: Data) -> CompressorPreset? {
         guard !payload.isEmpty,
               let dict = try? JSONSerialization.jsonObject(with: payload) as? [String: String],
               let rawValue = dict[PayloadKey.preset],
               let preset = CompressorPreset(rawValue: rawValue) else {
-            return .studio
+            return nil
         }
         return preset
     }

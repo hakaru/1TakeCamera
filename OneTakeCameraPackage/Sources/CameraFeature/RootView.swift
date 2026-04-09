@@ -2,6 +2,7 @@
 // Standard iOS Camera UI layout — full-bleed viewfinder, bottom control strip.
 
 import SwiftUI
+import MultiDeviceCoordinator
 
 @MainActor
 public struct RootView: View {
@@ -136,14 +137,18 @@ public struct RootView: View {
         }
         .task {
             // Wire RemoteControlService handlers before starting.
-            remote.onRemoteStartRequest = { [self] preset in
+            remote.onRemoteStartRequest = { [self] remotePreset in
                 Task { @MainActor in
-                    selectedPreset = preset
+                    // Use remotePreset if provided; otherwise keep the current selection.
+                    if let preset = remotePreset {
+                        selectedPreset = preset
+                    }
+                    let presetToUse = selectedPreset
                     if CameraSession.isCameraAvailable && !session.captureSession.isRunning {
                         let granted = await session.prewarm()
                         guard granted else { return }
                     }
-                    session.beginRecording(preset: preset)
+                    session.beginRecording(preset: presetToUse)
                 }
             }
             remote.onRemoteStopRequest = { [self] in
@@ -166,10 +171,13 @@ public struct RootView: View {
                 } else {
                     filename = nil
                 }
-                return RemoteStatus(
+                let presetRaw: String? = (stateString == "recording") ? selectedPreset.rawValue : nil
+                let elapsed: Int? = (stateString == "recording") ? elapsedSeconds : nil
+                return DeviceStatus(
+                    app: "1TakeCamera",
                     state: stateString,
-                    presetID: selectedPreset.rawValue,
-                    elapsedSeconds: elapsedSeconds,
+                    preset: presetRaw,
+                    elapsedSeconds: elapsed,
                     latestFilename: filename
                 )
             }
@@ -181,8 +189,10 @@ public struct RootView: View {
                 if case .recording = newViewState {
                     recordingStartDate = Date()
                     elapsedSeconds = 0
+                    remote.startHeartbeat()
                 } else {
                     recordingStartDate = nil
+                    remote.stopHeartbeat()
                 }
                 // Publish status on every state change.
                 remote.publishStatusUpdate()

@@ -20,6 +20,7 @@ let package = Package(
             dependencies: [
                 .product(name: "OneTakeDSPCore", package: "OneTakePackage"),
                 .product(name: "OneTakeDSPPresets", package: "OneTakePackage"),
+                .product(name: "MultiDeviceCoordinator", package: "OneTakePackage"),
                 .product(name: "PeerClock", package: "PeerClock"),
             ]
         ),
