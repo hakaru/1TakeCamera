@@ -1,0 +1,3 @@
+[submodule "vendor/1Take"]
+	path = vendor/1Take
+	url = https://github.com/hakaru/1Take.git

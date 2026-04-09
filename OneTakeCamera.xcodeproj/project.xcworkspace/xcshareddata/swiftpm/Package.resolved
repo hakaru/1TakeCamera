@@ -6,8 +6,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/hakaru/PeerClock.git",
       "state" : {
-        "branch" : "main",
-        "revision" : "3c8f24a2d361160b361d1e399c3bcc3700a85779"
+        "revision" : "71152f208491b027cac7fc826208ba4eee459056",
+        "version" : "0.2.0"
       }
     },
     {

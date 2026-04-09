@@ -11,7 +11,7 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(path: "../../1Take/OneTakePackage"),
+        .package(path: "../vendor/1Take/OneTakePackage"),
         .package(url: "https://github.com/hakaru/PeerClock.git", from: "0.2.0"),
     ],
     targets: [
