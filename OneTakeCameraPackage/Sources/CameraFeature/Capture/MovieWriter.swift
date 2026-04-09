@@ -1,5 +1,5 @@
 // MovieWriter.swift
-// Owns AVAssetWriter + video & audio inputs. Writes H.264+AAC MP4 to Documents.
+// Owns AVAssetWriter + video, audio, and timecode inputs. Writes H.264+AAC .mov to Documents.
 
 import AVFoundation
 import CoreMedia
@@ -9,7 +9,7 @@ import os
 
 private let logger = Logger(subsystem: "net.hakaru.OneTakeCamera", category: "MovieWriter")
 
-/// Writes a single MP4 recording to the app's Documents folder.
+/// Writes a single .mov recording (with QuickTime Timecode track) to the app's Documents folder.
 /// Created fresh for each recording session.
 final class MovieWriter: @unchecked Sendable {
 
@@ -46,28 +46,36 @@ final class MovieWriter: @unchecked Sendable {
     private let videoInput: AVAssetWriterInput
     private let audioInput: AVAssetWriterInput
 
+    // Timecode track (QuickTime TC64)
+    private var timecodeInput: AVAssetWriterInput?
+    private var tcFormatDescription: CMTimeCodeFormatDescription?
+    private let timecodeStartDate: Date
+
     // MARK: - Init
 
     init?(
         videoSize: CGSize = CGSize(width: 1920, height: 1080),
         videoBitRate: Int = 10_000_000,
         videoOrientation: UIDeviceOrientation = .portrait,
-        presetName: String = "Studio"
+        presetName: String = "Studio",
+        timecodeStartDate: Date = Date()
     ) {
+        self.timecodeStartDate = timecodeStartDate
+
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let filename = "1TakeCam-\(formatter.string(from: Date())).mp4"
+        let filename = "1TakeCam-\(formatter.string(from: timecodeStartDate)).mov"
         let url = docs.appendingPathComponent(filename)
 
-        guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mp4) else {
+        guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mov) else {
             logger.error("Failed to create AVAssetWriter at \(url.path, privacy: .public)")
             return nil
         }
         self.outputURL = url
         self.assetWriter = writer
 
-        // Embed preset name in MP4 software metadata
+        // Embed preset name in QuickTime software metadata
         let meta = AVMutableMetadataItem()
         meta.identifier = .commonIdentifierSoftware
         meta.value = "1Take Camera (\(presetName))" as NSString
@@ -102,6 +110,36 @@ final class MovieWriter: @unchecked Sendable {
 
         writer.add(vi)
         writer.add(ai)
+
+        // Timecode input: QuickTime TC64, 30fps non-drop
+        var tcFmtDesc: CMTimeCodeFormatDescription?
+        let frameDuration = CMTime(value: 1, timescale: 30)
+        let tcStatus = CMTimeCodeFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            timeCodeFormatType: kCMTimeCodeFormatType_TimeCode64,
+            frameDuration: frameDuration,
+            frameQuanta: 30,
+            flags: 0,  // non-drop frame
+            extensions: nil,
+            formatDescriptionOut: &tcFmtDesc
+        )
+        if tcStatus == noErr, let tcFmtDesc {
+            self.tcFormatDescription = tcFmtDesc
+            let tcInput = AVAssetWriterInput(
+                mediaType: .timecode,
+                outputSettings: nil,
+                sourceFormatHint: tcFmtDesc
+            )
+            tcInput.expectsMediaDataInRealTime = true
+            // Associate TC track with video track so QuickTime/FCP can find it.
+            vi.addTrackAssociation(withTrackOf: tcInput, type: AVAssetTrack.AssociationType.timecode.rawValue)
+            writer.add(tcInput)
+            self.timecodeInput = tcInput
+        } else {
+            logger.error("CMTimeCodeFormatDescriptionCreate failed: \(tcStatus, privacy: .public)")
+            self.timecodeInput = nil
+            self.tcFormatDescription = nil
+        }
     }
 
     // MARK: - Orientation Transform
@@ -218,6 +256,79 @@ final class MovieWriter: @unchecked Sendable {
             startup_drift=\(driftMs, privacy: .public)ms) \
             → \(self.outputURL.lastPathComponent, privacy: .public)
             """)
+
+        // Write the single timecode sample covering the entire recording.
+        writeTimecodeStart(at: startPTS)
+    }
+
+    /// Writes ONE TC64 sample at recording start, covering the full recording duration.
+    /// The sample's duration is set to 24 hours (AVAssetWriter truncates on finalize).
+    private func writeTimecodeStart(at pts: CMTime) {
+        guard let tcInput = timecodeInput, tcInput.isReadyForMoreMediaData,
+              let tcFmtDesc = tcFormatDescription else { return }
+
+        let cal = Calendar.current
+        let date = timecodeStartDate
+        let h = cal.component(.hour, from: date)
+        let m = cal.component(.minute, from: date)
+        let s = cal.component(.second, from: date)
+        let subsec = date.timeIntervalSince1970.truncatingRemainder(dividingBy: 1.0)
+        let f = Int(subsec * 30)  // 30fps frame number within the second
+        let frameNumber: Int64 = Int64(h * 108000 + m * 1800 + s * 30 + f)
+
+        logger.info("Timecode start: \(String(format: "%02d:%02d:%02d:%02d", h, m, s, f), privacy: .public) (frame \(frameNumber, privacy: .public))")
+
+        // 8-byte big-endian Int64 frame number (TimeCode64 format)
+        var frameNumberBE = frameNumber.bigEndian
+        let data = Data(bytes: &frameNumberBE, count: 8)
+
+        var blockBuffer: CMBlockBuffer?
+        let bbStatus = data.withUnsafeBytes { rawBuf -> OSStatus in
+            CMBlockBufferCreateWithMemoryBlock(
+                allocator: kCFAllocatorDefault,
+                memoryBlock: UnsafeMutableRawPointer(mutating: rawBuf.baseAddress!),
+                blockLength: 8,
+                blockAllocator: kCFAllocatorNull,
+                customBlockSource: nil,
+                offsetToData: 0,
+                dataLength: 8,
+                flags: 0,
+                blockBufferOut: &blockBuffer
+            )
+        }
+        guard bbStatus == kCMBlockBufferNoErr, let blockBuffer else {
+            logger.error("TC CMBlockBufferCreateWithMemoryBlock failed: \(bbStatus, privacy: .public)")
+            return
+        }
+
+        // Duration covers 24 hours so the single sample spans the entire recording.
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: CMTimeValue(24 * 60 * 60 * 30), timescale: 30),
+            presentationTimeStamp: pts,
+            decodeTimeStamp: .invalid
+        )
+        var sampleBuffer: CMSampleBuffer?
+        let sbStatus = CMSampleBufferCreate(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: blockBuffer,
+            dataReady: true,
+            makeDataReadyCallback: nil,
+            refcon: nil,
+            formatDescription: tcFmtDesc,
+            sampleCount: 1,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleSizeEntryCount: 0,
+            sampleSizeArray: nil,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard sbStatus == noErr, let sampleBuffer else {
+            logger.error("TC CMSampleBufferCreate failed: \(sbStatus, privacy: .public)")
+            return
+        }
+
+        tcInput.append(sampleBuffer)
+        logger.info("Timecode sample appended at PTS \(pts.seconds, privacy: .public)s")
     }
 
     func finalize() async -> URL? {
@@ -268,6 +379,7 @@ final class MovieWriter: @unchecked Sendable {
         isStarted = false
         videoInput.markAsFinished()
         audioInput.markAsFinished()
+        timecodeInput?.markAsFinished()
         await assetWriter.finishWriting()
 
         let finalStatus = assetWriter.status
@@ -302,8 +414,8 @@ final class MovieWriter: @unchecked Sendable {
         let pendingFirstVideoPTS: CMTime
         let pendingFirstAudioPTS: CMTime
 
-        func write(nextTo mp4URL: URL, logger: Logger) {
-            let jsonURL = mp4URL.deletingPathExtension().appendingPathExtension("json")
+        func write(nextTo movURL: URL, logger: Logger) {
+            let jsonURL = movURL.deletingPathExtension().appendingPathExtension("json")
 
             let startupSkew_ms = (pendingFirstVideoPTS.isValid && pendingFirstAudioPTS.isValid)
                 ? (pendingFirstVideoPTS.seconds - pendingFirstAudioPTS.seconds) * 1000

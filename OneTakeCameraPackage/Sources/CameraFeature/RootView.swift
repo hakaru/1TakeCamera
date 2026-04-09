@@ -26,6 +26,9 @@ public struct RootView: View {
     // Current device orientation (for preview rotation angle)
     @State private var deviceOrientation: UIDeviceOrientation = .portrait
 
+    // Audio input label
+    @State private var currentAudioInputName: String = "Built-in Mic"
+
     // Elapsed time
     @State private var recordingStartDate: Date? = nil
     @State private var elapsedSeconds: Int = 0
@@ -192,6 +195,9 @@ public struct RootView: View {
                 currentResolution = downgraded
                 is4KSupported = session.is4KSupported
             }
+            session.onAudioInputChange = { [self] name in
+                currentAudioInputName = name
+            }
 
             // Prewarm: configure session + start preview before user taps record.
             if CameraSession.isCameraAvailable {
@@ -204,6 +210,7 @@ public struct RootView: View {
                     isFrontCamera = session.isFrontCamera
                     currentResolution = session.currentResolution
                     is4KSupported = session.is4KSupported
+                    currentAudioInputName = session.currentAudioInputName
                     // Start level meter now that audio is flowing.
                     levelMonitor.start(
                         reading: { [session] in session.currentAudioPeak() },
@@ -211,6 +218,10 @@ public struct RootView: View {
                     )
                 }
             }
+
+            // Inject PeerClock into CameraSession for timecode generation at recording start.
+            // remote.start() was already called above; peerClock is available after that.
+            session.setPeerClock(remote.peerClock)
         }
         .onChange(of: currentLensID) { _, newID in
             guard !isFrontCamera else { return }
@@ -260,13 +271,16 @@ public struct RootView: View {
             // Top overlay row: preset pill (left) + resolution toggle (left of center)
             HStack {
                 if isIdle {
-                    Text(selectedPreset.displayName)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(Color.black.opacity(0.5))
-                        .clipShape(Capsule())
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(selectedPreset.displayName)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(Color.black.opacity(0.5))
+                            .clipShape(Capsule())
+                        AudioInputLabel(inputName: currentAudioInputName)
+                    }
                     ResolutionToggle(
                         resolution: $currentResolution,
                         is4KSupported: is4KSupported,

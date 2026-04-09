@@ -6,6 +6,7 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import PeerClock
 import UIKit
 import os
 
@@ -66,6 +67,12 @@ final class CameraSession: NSObject, @unchecked Sendable {
     /// Whether the front camera is currently active.
     private(set) var isFrontCamera: Bool = false
 
+    // MARK: - Audio input
+
+    /// Human-readable name of the currently active audio input (e.g. "Scarlett 2i2").
+    /// Updated on route changes; safe to read from any context (written on captureQueue via notifyAudioInput).
+    private(set) var currentAudioInputName: String = "Built-in Mic"
+
     // MARK: - Resolution
 
     /// The currently configured capture resolution.
@@ -87,6 +94,9 @@ final class CameraSession: NSObject, @unchecked Sendable {
 
     /// Called on main actor when the resolution is downgraded (e.g. after camera switch).
     var onResolutionDowngrade: (@MainActor (CaptureResolution) -> Void)?
+
+    /// Called on main actor when the active audio input device name changes.
+    var onAudioInputChange: (@MainActor (String) -> Void)?
 
     // MARK: - Private — all accessed only from captureQueue
 
@@ -145,6 +155,10 @@ final class CameraSession: NSObject, @unchecked Sendable {
     private var interruptionHandler: InterruptionHandler?
     private let thermalMonitor = ThermalMonitor()
 
+    // PeerClock reference for timecode — set by RootView after prewarm.
+    // Only read on captureQueue (from beginRecording).
+    private var peerClock: PeerClock?
+
     // MARK: - Init
 
     override init() {
@@ -179,6 +193,14 @@ final class CameraSession: NSObject, @unchecked Sendable {
     /// Returns true if post-DSP audio exceeded -1 dBFS (0.891 linear) since last call; resets the flag.
     func currentAudioClipped() -> Bool {
         processor.readClippedAndReset()
+    }
+
+    /// Inject the PeerClock reference used for timecode at recording start.
+    /// Safe to call from any context.
+    func setPeerClock(_ clock: PeerClock?) {
+        captureQueue.async { [weak self] in
+            self?.peerClock = clock
+        }
     }
 
     func requestPermissionsAndSetup() async -> Bool {
@@ -254,9 +276,26 @@ final class CameraSession: NSObject, @unchecked Sendable {
                 }
                 Task { await self.finalize() }
             }
+            // Route-change callback: update audio input label + reset format cache when idle.
+            handler.onRouteChanged = { [weak self] in
+                guard let self else { return }
+                var isRecording = false
+                self.captureQueue.sync { isRecording = self.movieWriter != nil }
+                if !isRecording {
+                    // Reset converter so next recording picks up the new format.
+                    self.captureQueue.async { [weak self] in
+                        self?.converter.resetFormat()
+                    }
+                }
+                // Always refresh the UI label.
+                self.refreshAudioInputName()
+            }
             handler.start()
             interruptionHandler = handler
         }
+
+        // Seed the initial audio input name.
+        refreshAudioInputName()
 
         thermalMonitor.start()
 
@@ -267,16 +306,35 @@ final class CameraSession: NSObject, @unchecked Sendable {
         // Capture resolution + orientation on captureQueue before creating the writer.
         var lockedOrientation: UIDeviceOrientation = .portrait
         var lockedResolution: CaptureResolution = .hd
+        var lockedPeerClock: PeerClock?
         captureQueue.sync { [self] in
             lockedOrientation = self.currentDeviceOrientation
             lockedResolution = self.currentResolution
             self.recordingOrientation = lockedOrientation
+            lockedPeerClock = self.peerClock
         }
+
+        // Pin the current audio input to prevent AVCaptureSession from auto-switching mid-recording.
+        let audioSession = AVAudioSession.sharedInstance()
+        let preferredInput = audioSession.currentRoute.inputs.first
+        if let input = preferredInput {
+            do {
+                try audioSession.setPreferredInput(input)
+                logger.info("Pinned audio input: \(input.portName, privacy: .public)")
+            } catch {
+                logger.warning("Could not pin audio input: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        // Derive timecode start date from PeerClock (or wall clock as fallback).
+        let timecodeDate = Self.wallClockDate(from: lockedPeerClock)
+
         let writer = MovieWriter(
             videoSize: lockedResolution.videoSize,
             videoBitRate: lockedResolution.videoBitRate,
             videoOrientation: lockedOrientation,
-            presetName: preset.displayName
+            presetName: preset.displayName,
+            timecodeStartDate: timecodeDate
         )
         guard let writer else {
             notifyState(.failed("Could not create output file"))
@@ -293,6 +351,20 @@ final class CameraSession: NSObject, @unchecked Sendable {
             session.startRunning()
         }
         notifyState(.recording)
+    }
+
+    /// Convert PeerClock.now (mach_continuous_time nanoseconds) to a wall-clock Date.
+    /// Falls back to Date() if clock is nil or not synchronized.
+    private static func wallClockDate(from clock: PeerClock?) -> Date {
+        guard let clock, clock.currentSync.isSynchronized else {
+            return Date()
+        }
+        // PeerClock.now returns mach_continuous_time-based nanoseconds (uptime since boot).
+        // Relate to wall clock via ProcessInfo.systemUptime.
+        let uptimeNow = ProcessInfo.processInfo.systemUptime
+        let bootDate = Date().addingTimeInterval(-uptimeNow)
+        let peerUptimeSeconds = Double(clock.now) / 1_000_000_000
+        return bootDate.addingTimeInterval(peerUptimeSeconds)
     }
 
     func stopRecording() async {
@@ -352,6 +424,13 @@ final class CameraSession: NSObject, @unchecked Sendable {
 
     func finalize() async {
         notifyState(.finalizing)
+
+        // Release pinned audio input so the session is free to auto-select after recording.
+        do {
+            try AVAudioSession.sharedInstance().setPreferredInput(nil)
+        } catch {
+            logger.warning("Could not release pinned audio input: \(error.localizedDescription, privacy: .public)")
+        }
 
         // Step 0: let the audio pipeline flush its tail buffers (~60ms capture latency).
         // Without this, stopRunning() cuts the last ~60ms of audio from the mic driver.
@@ -699,6 +778,31 @@ final class CameraSession: NSObject, @unchecked Sendable {
         let callback = onStateChange
         Task { @MainActor in
             callback?(state)
+        }
+    }
+
+    /// Reads the current AVAudioSession route and updates `currentAudioInputName`.
+    /// Must be called from captureQueue (or any queue — AVAudioSession is thread-safe for reads).
+    private func refreshAudioInputName() {
+        let inputs = AVAudioSession.sharedInstance().currentRoute.inputs
+        let name: String
+        if let first = inputs.first {
+            // Filter out Bluetooth — not supported per spec
+            let btTypes: [AVAudioSession.Port] = [.bluetoothHFP, .bluetoothA2DP, .bluetoothLE]
+            if btTypes.contains(first.portType) {
+                name = "Built-in Mic"
+                // Fall back: release any preferred input
+                try? AVAudioSession.sharedInstance().setPreferredInput(nil)
+            } else {
+                name = first.portName
+            }
+        } else {
+            name = "Built-in Mic"
+        }
+        let callback = onAudioInputChange
+        Task { @MainActor [weak self] in
+            self?.currentAudioInputName = name
+            callback?(name)
         }
     }
 }

@@ -35,7 +35,7 @@ public enum RecordingStore {
             options: [.skipsHiddenFiles]
         ) else { return [] }
         return files
-            .filter { $0.pathExtension.lowercased() == "mp4" }
+            .filter { $0.pathExtension.lowercased() == "mov" }
             .compactMap { try? RecordingFile(url: $0) }
             .sorted { $0.createdAt > $1.createdAt }
     }

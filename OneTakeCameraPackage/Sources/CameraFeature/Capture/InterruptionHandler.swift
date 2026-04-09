@@ -6,9 +6,13 @@ private let logger = Logger(subsystem: "net.hakaru.OneTakeCamera", category: "In
 
 /// Observes AVCaptureSession interruption and AVAudioSession route changes.
 /// On any interruption, invokes the supplied handler so CameraSession can finalize.
+/// On a non-interruption route change (device available/unavailable), invokes `onRouteChanged`.
 public final class InterruptionHandler: @unchecked Sendable {
     private weak var session: AVCaptureSession?
     private let onInterruption: @Sendable () -> Void
+    /// Called on any non-interruption route change (.newDeviceAvailable or .oldDeviceUnavailable).
+    /// Use this to update UI and reset format caches when not recording.
+    var onRouteChanged: (@Sendable () -> Void)?
     private var observers: [NSObjectProtocol] = []
 
     public init(session: AVCaptureSession, onInterruption: @escaping @Sendable () -> Void) {
@@ -43,10 +47,18 @@ public final class InterruptionHandler: @unchecked Sendable {
         ) { [weak self] note in
             let rawReason = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
             let reason = AVAudioSession.RouteChangeReason(rawValue: rawReason)
-            logger.warning("AVAudioSession route change: \(String(describing: reason), privacy: .public)")
-            // Only treat as interruption if the new route is incompatible; for MVP, finalize on any.
-            if reason == .oldDeviceUnavailable || reason == .unknown {
+            logger.info("AVAudioSession route change: \(String(describing: reason), privacy: .public)")
+            switch reason {
+            case .oldDeviceUnavailable, .unknown:
+                // Treat as interruption — finalize if recording.
                 self?.onInterruption()
+                // Also notify of generic route change (e.g. to update label if not recording).
+                self?.onRouteChanged?()
+            case .newDeviceAvailable:
+                // New device plugged in — not an interruption, but update UI and format cache.
+                self?.onRouteChanged?()
+            default:
+                break
             }
         }
         observers.append(routeChange)

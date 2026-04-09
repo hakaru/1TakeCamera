@@ -55,6 +55,18 @@ final class SampleBufferConverter: @unchecked Sendable {
         self.outputCMFormat = cmFmt
     }
 
+    // MARK: - Format Reset
+
+    /// Clears the cached bypass/convert decision and AVAudioConverter.
+    /// Call this when the audio route changes while NOT recording so the next buffer
+    /// re-evaluates the input format (e.g. after plugging in a USB-C interface).
+    func resetFormat() {
+        bypassConverter = nil
+        inputFormat = nil
+        converter = nil
+        logger.info("SampleBufferConverter: format cache cleared (route change)")
+    }
+
     // MARK: - CMSampleBuffer → Float32 stereo
 
     // Bypass flag: set once we confirm the capture format matches internal format.

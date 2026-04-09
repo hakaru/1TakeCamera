@@ -62,7 +62,8 @@ public final class RemoteControlService {
 
     // MARK: - Private
 
-    private var peerClock: PeerClock?
+    /// Exposed for CameraSession timecode injection. Available after `start()` is called.
+    private(set) var peerClock: PeerClock?
     private var streamTasks: [Task<Void, Never>] = []
 
     // MARK: - Init
