@@ -57,6 +57,20 @@ final class AudioProcessor: @unchecked Sendable {
         limiterState = LimiterState()
     }
 
+    /// Resets all engine states to their initial values.
+    /// Call after a camera switch to clear biquad filter history, envelope followers,
+    /// and limiter gain from the previous camera's audio characteristics.
+    func resetAllStates() {
+        trimState = TrimState()
+        gateState = GateState()
+        eqState = EQState()
+        compState1 = CompressorState()
+        compState2 = CompressorState()
+        saturationState = SaturationState()
+        stereoState = StereoFieldState()
+        limiterState = LimiterState()
+    }
+
     /// Propagates sample rate to all stateful engines. Call from captureQueue.
     func setSampleRate(_ sr: Float) {
         compState1.sampleRate = sr

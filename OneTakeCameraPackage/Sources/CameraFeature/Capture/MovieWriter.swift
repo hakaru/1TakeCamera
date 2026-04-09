@@ -4,6 +4,7 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import UIKit
 import os
 
 private let logger = Logger(subsystem: "net.hakaru.OneTakeCamera", category: "MovieWriter")
@@ -47,7 +48,12 @@ final class MovieWriter: @unchecked Sendable {
 
     // MARK: - Init
 
-    init?(videoSize: CGSize = CGSize(width: 1920, height: 1080), presetName: String = "Studio") {
+    init?(
+        videoSize: CGSize = CGSize(width: 1920, height: 1080),
+        videoBitRate: Int = 10_000_000,
+        videoOrientation: UIDeviceOrientation = .portrait,
+        presetName: String = "Studio"
+    ) {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
@@ -68,18 +74,19 @@ final class MovieWriter: @unchecked Sendable {
         meta.extendedLanguageTag = "und"
         writer.metadata = [meta]
 
-        // Video input: H.264, 1080p30
+        // Video input: H.264
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: Int(videoSize.width),
             AVVideoHeightKey: Int(videoSize.height),
             AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: 10_000_000, // 10 Mbps
+                AVVideoAverageBitRateKey: videoBitRate,
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
             ],
         ]
         let vi = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         vi.expectsMediaDataInRealTime = true
+        vi.transform = MovieWriter.transform(for: videoOrientation)
         self.videoInput = vi
 
         // Audio input: AAC stereo 48kHz
@@ -95,6 +102,27 @@ final class MovieWriter: @unchecked Sendable {
 
         writer.add(vi)
         writer.add(ai)
+    }
+
+    // MARK: - Orientation Transform
+
+    /// Returns the CGAffineTransform to embed in AVAssetWriterInput so that the
+    /// recorded video plays back at the correct orientation in all players.
+    /// The sensor always captures in landscape-right (USB-C on left), so:
+    ///   - Portrait      → rotate 90° CCW  (π/2)
+    ///   - LandscapeRight → identity        (sensor native; USB-C on left)
+    ///   - LandscapeLeft  → rotate 180°    (USB-C on right)
+    static func transform(for orientation: UIDeviceOrientation) -> CGAffineTransform {
+        switch orientation {
+        case .portrait:
+            return CGAffineTransform(rotationAngle: .pi / 2)
+        case .landscapeRight:
+            return .identity
+        case .landscapeLeft:
+            return CGAffineTransform(rotationAngle: .pi)
+        default:
+            return CGAffineTransform(rotationAngle: .pi / 2) // fallback to portrait
+        }
     }
 
     // MARK: - Lifecycle

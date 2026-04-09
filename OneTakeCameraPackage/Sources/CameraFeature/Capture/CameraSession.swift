@@ -6,6 +6,7 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import UIKit
 import os
 
 private let logger = Logger(subsystem: "net.hakaru.OneTakeCamera", category: "Capture")
@@ -60,6 +61,33 @@ final class CameraSession: NSObject, @unchecked Sendable {
     /// The id of the currently active lens (matches a LensOption.id in availableLenses).
     private(set) var currentLensID: String = ""
 
+    // MARK: - Camera position
+
+    /// Whether the front camera is currently active.
+    private(set) var isFrontCamera: Bool = false
+
+    // MARK: - Resolution
+
+    /// The currently configured capture resolution.
+    private(set) var currentResolution: CaptureResolution = .hd
+
+    /// Whether the current camera supports 4K.
+    private(set) var is4KSupported: Bool = false
+
+    // MARK: - Orientation (main-actor-readable; written on captureQueue)
+
+    /// The device orientation locked at recording start. Used for video transform.
+    private(set) var recordingOrientation: UIDeviceOrientation = .portrait
+
+    // MARK: - Orientation change callback
+
+    /// Called on main actor when the device orientation changes so the preview
+    /// layer's videoRotationAngle can be updated by the view layer.
+    var onOrientationChange: (@MainActor (UIDeviceOrientation) -> Void)?
+
+    /// Called on main actor when the resolution is downgraded (e.g. after camera switch).
+    var onResolutionDowngrade: (@MainActor (CaptureResolution) -> Void)?
+
     // MARK: - Private — all accessed only from captureQueue
 
     private let captureQueue = DispatchQueue(
@@ -98,6 +126,21 @@ final class CameraSession: NSObject, @unchecked Sendable {
     // Accessed from captureQueue only.
     private var currentVideoInput: AVCaptureDeviceInput?
 
+    // Video and audio outputs — stored as properties to allow post-switch reconfiguration.
+    // Accessed from captureQueue only.
+    private var videoOutput: AVCaptureVideoDataOutput?
+    private var audioOutput: AVCaptureAudioDataOutput?
+
+    // Front/rear camera tracking (captureQueue only)
+    private var currentPosition: AVCaptureDevice.Position = .back
+    private var lastRearLensID: String = ""
+
+    // Orientation tracking (captureQueue only)
+    private var currentDeviceOrientation: UIDeviceOrientation = .portrait
+
+    // Orientation notification observer token (main thread lifetime)
+    private var orientationObserver: NSObjectProtocol?
+
     // Interruption + thermal monitors (live for the session lifetime)
     private var interruptionHandler: InterruptionHandler?
     private let thermalMonitor = ThermalMonitor()
@@ -120,6 +163,9 @@ final class CameraSession: NSObject, @unchecked Sendable {
     deinit {
         interruptionHandler?.stop()
         thermalMonitor.stop()
+        if let obs = orientationObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
     }
 
     // MARK: - Public API (called from @MainActor)
@@ -160,6 +206,39 @@ final class CameraSession: NSObject, @unchecked Sendable {
             logger.info("CameraSession prewarmed — preview running")
         }
 
+        // Start orientation tracking (must happen on main thread via UIDevice).
+        if orientationObserver == nil {
+            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+            let obs = NotificationCenter.default.addObserver(
+                forName: UIDevice.orientationDidChangeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                let raw = UIDevice.current.orientation
+                // Ignore ambiguous orientations; keep last known valid orientation.
+                guard raw != .faceUp, raw != .faceDown, raw != .unknown,
+                      raw != .portraitUpsideDown else { return }
+                self.captureQueue.async { [weak self] in
+                    guard let self else { return }
+                    self.currentDeviceOrientation = raw
+                }
+                let callback = self.onOrientationChange
+                Task { @MainActor in
+                    callback?(raw)
+                }
+            }
+            orientationObserver = obs
+            // Seed with current orientation if already valid.
+            let initial = UIDevice.current.orientation
+            if initial != .faceUp && initial != .faceDown && initial != .unknown
+                && initial != .portraitUpsideDown {
+                captureQueue.async { [weak self] in
+                    self?.currentDeviceOrientation = initial
+                }
+            }
+        }
+
         // Start interruption handler (keep running for session lifetime; only triggers
         // finalize when recording is active — checked inside the closure via captureQueue).
         if interruptionHandler == nil {
@@ -185,7 +264,20 @@ final class CameraSession: NSObject, @unchecked Sendable {
     }
 
     func beginRecording(preset: CompressorPreset = .studio) {
-        let writer = MovieWriter(presetName: preset.displayName)
+        // Capture resolution + orientation on captureQueue before creating the writer.
+        var lockedOrientation: UIDeviceOrientation = .portrait
+        var lockedResolution: CaptureResolution = .hd
+        captureQueue.sync { [self] in
+            lockedOrientation = self.currentDeviceOrientation
+            lockedResolution = self.currentResolution
+            self.recordingOrientation = lockedOrientation
+        }
+        let writer = MovieWriter(
+            videoSize: lockedResolution.videoSize,
+            videoBitRate: lockedResolution.videoBitRate,
+            videoOrientation: lockedOrientation,
+            presetName: preset.displayName
+        )
         guard let writer else {
             notifyState(.failed("Could not create output file"))
             return
@@ -238,6 +330,7 @@ final class CameraSession: NSObject, @unchecked Sendable {
                 let newID = lens.id
                 let newName = lens.displayName
                 self.session.commitConfiguration()
+                self.lastRearLensID = newID
                 logger.info("switchLens → \(newName, privacy: .public) (\(newID, privacy: .public))")
                 // Notify UI on main actor.
                 let lenses = self.availableLenses
@@ -365,12 +458,17 @@ final class CameraSession: NSObject, @unchecked Sendable {
         session.addInput(videoInput)
         currentVideoInput = videoInput
 
+        // Track last rear lens ID for camera switch restoration.
+        lastRearLensID = initialLens.id
+        currentPosition = .back
+
         // Publish lens list + current selection to main actor.
         let lenses = discoveredLenses
         let selectedID = initialLens.id
         Task { @MainActor [weak self] in
             self?.availableLenses = lenses
             self?.currentLensID = selectedID
+            self?.isFrontCamera = false
         }
 
         // Built-in mic
@@ -384,31 +482,40 @@ final class CameraSession: NSObject, @unchecked Sendable {
         session.addInput(audioInput)
 
         // Video output
-        let videoOutput = AVCaptureVideoDataOutput()
-        videoOutput.videoSettings = [
+        let vo = AVCaptureVideoDataOutput()
+        vo.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         ]
-        videoOutput.alwaysDiscardsLateVideoFrames = true
-        videoOutput.setSampleBufferDelegate(self, queue: captureQueue)
-        guard session.canAddOutput(videoOutput) else {
+        vo.alwaysDiscardsLateVideoFrames = true
+        vo.setSampleBufferDelegate(self, queue: captureQueue)
+        guard session.canAddOutput(vo) else {
             logger.error("Could not add video output")
             session.commitConfiguration()
             return false
         }
-        session.addOutput(videoOutput)
+        session.addOutput(vo)
+        videoOutput = vo
 
         // Audio output
-        let audioOutput = AVCaptureAudioDataOutput()
-        audioOutput.setSampleBufferDelegate(self, queue: captureQueue)
-        guard session.canAddOutput(audioOutput) else {
+        let ao = AVCaptureAudioDataOutput()
+        ao.setSampleBufferDelegate(self, queue: captureQueue)
+        guard session.canAddOutput(ao) else {
             logger.error("Could not add audio output")
             session.commitConfiguration()
             return false
         }
-        session.addOutput(audioOutput)
+        session.addOutput(ao)
+        audioOutput = ao
 
         session.commitConfiguration()
-        logger.info("AVCaptureSession configured")
+
+        // Check 4K support for the initial rear camera.
+        let supports4K = session.canSetSessionPreset(.hd4K3840x2160)
+        Task { @MainActor [weak self] in
+            self?.is4KSupported = supports4K
+        }
+
+        logger.info("AVCaptureSession configured — 4K supported: \(supports4K, privacy: .public)")
         return true
     }
 
@@ -460,6 +567,129 @@ final class CameraSession: NSObject, @unchecked Sendable {
         ]
         return options.sorted {
             (order.firstIndex(of: $0.deviceType) ?? 99) < (order.firstIndex(of: $1.deviceType) ?? 99)
+        }
+    }
+
+    // MARK: - Camera Switch
+
+    /// Toggle between front and rear camera. No-op while recording.
+    /// Safe to call from any context — work is dispatched to captureQueue.
+    func switchCamera() {
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            guard self.movieWriter == nil else {
+                logger.warning("switchCamera ignored — recording in progress")
+                return
+            }
+
+            let targetPosition: AVCaptureDevice.Position = self.currentPosition == .back ? .front : .back
+
+            // Discover the target device.
+            let deviceType: AVCaptureDevice.DeviceType = .builtInWideAngleCamera
+            guard let device = AVCaptureDevice.default(deviceType, for: .video, position: targetPosition),
+                  let newInput = try? AVCaptureDeviceInput(device: device) else {
+                logger.error("switchCamera: could not find \(targetPosition == .front ? "front" : "rear", privacy: .public) camera")
+                return
+            }
+
+            self.session.beginConfiguration()
+            if let old = self.currentVideoInput {
+                self.session.removeInput(old)
+            }
+            guard self.session.canAddInput(newInput) else {
+                // Restore old input on failure
+                if let old = self.currentVideoInput, self.session.canAddInput(old) {
+                    self.session.addInput(old)
+                }
+                self.session.commitConfiguration()
+                logger.error("switchCamera: canAddInput returned false")
+                return
+            }
+            self.session.addInput(newInput)
+            self.currentVideoInput = newInput
+            self.currentPosition = targetPosition
+
+            // Check resolution compatibility after adding new input.
+            var resolvedResolution = self.currentResolution
+            if self.currentResolution != .hd,
+               !self.session.canSetSessionPreset(self.currentResolution.sessionPreset) {
+                logger.info("switchCamera: downgrading from \(self.currentResolution.rawValue, privacy: .public) to HD — not supported")
+                resolvedResolution = .hd
+                self.session.sessionPreset = CaptureResolution.hd.sessionPreset
+            }
+            self.currentResolution = resolvedResolution
+            self.session.commitConfiguration()
+
+            // Post-switch: fix video mirroring on recorded output (never mirror recorded video).
+            if let conn = self.videoOutput?.connection(with: .video) {
+                conn.isVideoMirrored = false
+            }
+
+            // Reset audio DSP state to clear filter history from previous camera.
+            self.processor.resetAllStates()
+            self.hasSetSampleRate = false
+
+            // Check 4K support for the new camera.
+            let supports4K = self.session.canSetSessionPreset(.hd4K3840x2160)
+            let isFront = targetPosition == .front
+            let rearLenses = isFront ? [] : Self.discoverLenses()
+            let rearSelected = isFront ? "" : (
+                self.lastRearLensID.isEmpty
+                    ? (rearLenses.first(where: { $0.deviceType == .builtInWideAngleCamera })?.id ?? rearLenses.first?.id ?? "")
+                    : self.lastRearLensID
+            )
+            let resolutionForUI = resolvedResolution
+            let downgradedFromFour = resolvedResolution != self.currentResolution || (self.currentResolution == .hd && resolvedResolution == .hd && false)
+            let wasDowngraded = (resolvedResolution == .hd && self.currentResolution == .fourK)
+
+            // Notify UI.
+            let onDowngrade = self.onResolutionDowngrade
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.isFrontCamera = isFront
+                self.is4KSupported = supports4K
+                self.currentResolution = resolutionForUI
+                if isFront {
+                    self.availableLenses = []
+                    self.currentLensID = ""
+                } else {
+                    self.availableLenses = rearLenses
+                    self.currentLensID = rearSelected
+                }
+                if wasDowngraded {
+                    onDowngrade?(resolutionForUI)
+                }
+            }
+
+            logger.info("switchCamera → \(isFront ? "front" : "rear", privacy: .public)")
+        }
+    }
+
+    // MARK: - Resolution
+
+    /// Change the capture session preset. No-op while recording or if already set.
+    /// Safe to call from any context — work is dispatched to captureQueue.
+    func setResolution(_ resolution: CaptureResolution) {
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            guard self.movieWriter == nil else {
+                logger.warning("setResolution ignored — recording in progress")
+                return
+            }
+            guard resolution != self.currentResolution else { return }
+            guard self.session.canSetSessionPreset(resolution.sessionPreset) else {
+                logger.warning("setResolution: preset \(resolution.rawValue, privacy: .public) not supported")
+                return
+            }
+            self.session.beginConfiguration()
+            self.session.sessionPreset = resolution.sessionPreset
+            self.session.commitConfiguration()
+            self.currentResolution = resolution
+            let res = resolution
+            Task { @MainActor [weak self] in
+                self?.currentResolution = res
+            }
+            logger.info("setResolution → \(resolution.rawValue, privacy: .public)")
         }
     }
 

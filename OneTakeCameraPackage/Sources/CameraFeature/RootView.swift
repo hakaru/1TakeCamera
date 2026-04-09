@@ -18,6 +18,14 @@ public struct RootView: View {
     // Lens selection — mirrored from CameraSession after prewarm.
     @State private var currentLensID: String = ""
 
+    // Camera position + resolution
+    @State private var isFrontCamera: Bool = false
+    @State private var currentResolution: CaptureResolution = .hd
+    @State private var is4KSupported: Bool = false
+
+    // Current device orientation (for preview rotation angle)
+    @State private var deviceOrientation: UIDeviceOrientation = .portrait
+
     // Elapsed time
     @State private var recordingStartDate: Date? = nil
     @State private var elapsedSeconds: Int = 0
@@ -176,6 +184,15 @@ public struct RootView: View {
                 // Publish status on every state change.
                 remote.publishStatusUpdate()
             }
+            // Wire orientation change and resolution downgrade callbacks.
+            session.onOrientationChange = { [self] orientation in
+                deviceOrientation = orientation
+            }
+            session.onResolutionDowngrade = { [self] downgraded in
+                currentResolution = downgraded
+                is4KSupported = session.is4KSupported
+            }
+
             // Prewarm: configure session + start preview before user taps record.
             if CameraSession.isCameraAvailable {
                 let granted = await session.prewarm()
@@ -184,6 +201,9 @@ public struct RootView: View {
                 } else {
                     // Sync initial lens selection from session.
                     currentLensID = session.currentLensID
+                    isFrontCamera = session.isFrontCamera
+                    currentResolution = session.currentResolution
+                    is4KSupported = session.is4KSupported
                     // Start level meter now that audio is flowing.
                     levelMonitor.start(
                         reading: { [session] in session.currentAudioPeak() },
@@ -193,7 +213,11 @@ public struct RootView: View {
             }
         }
         .onChange(of: currentLensID) { _, newID in
+            guard !isFrontCamera else { return }
             session.switchLens(to: newID)
+        }
+        .onChange(of: currentResolution) { _, newRes in
+            session.setResolution(newRes)
         }
         .task(id: isRecording) {
             guard isRecording else { return }
@@ -233,7 +257,7 @@ public struct RootView: View {
 
     private var bottomControlStrip: some View {
         VStack(spacing: 12) {
-            // Top-left preset indicator pill (idle only)
+            // Top overlay row: preset pill (left) + resolution toggle (left of center)
             HStack {
                 if isIdle {
                     Text(selectedPreset.displayName)
@@ -243,10 +267,15 @@ public struct RootView: View {
                         .padding(.vertical, 4)
                         .background(Color.black.opacity(0.5))
                         .clipShape(Capsule())
-                        .padding(.leading, 20)
+                    ResolutionToggle(
+                        resolution: $currentResolution,
+                        is4KSupported: is4KSupported,
+                        isEnabled: isIdle
+                    )
                 }
                 Spacer()
             }
+            .padding(.leading, 20)
 
             // Elapsed time badge — visible only while recording.
             if isRecording {
@@ -281,8 +310,8 @@ public struct RootView: View {
                 .frame(height: 6)
                 .padding(.horizontal, 40)
 
-            // Lens selector — shown only when 2+ lenses are available.
-            if session.availableLenses.count > 1 {
+            // Lens selector — shown only when 2+ rear lenses are available and not using front camera.
+            if !isFrontCamera && session.availableLenses.count > 1 {
                 LensSelectorView(
                     lenses: session.availableLenses,
                     selection: $currentLensID,
@@ -293,10 +322,24 @@ public struct RootView: View {
             // Preset selector.
             PresetSelectorView(selection: $selectedPreset, isEnabled: isIdle)
 
-            // Button row: [spacer] [record button] [list button]
+            // Button row: [camera switch] [record button] [list button]
             HStack(alignment: .center) {
-                // Balance spacer matching list button width.
-                Spacer().frame(width: 56)
+                // Camera switch button — left side, matches list button size.
+                CameraSwitchButton(
+                    isFront: isFrontCamera,
+                    isEnabled: isIdle
+                ) {
+                    isFrontCamera.toggle()
+                    session.switchCamera()
+                    // Sync state from session after switch
+                    Task { @MainActor in
+                        isFrontCamera = session.isFrontCamera
+                        currentLensID = session.currentLensID
+                        is4KSupported = session.is4KSupported
+                        currentResolution = session.currentResolution
+                    }
+                }
+                .frame(width: 56)
 
                 Spacer()
 
