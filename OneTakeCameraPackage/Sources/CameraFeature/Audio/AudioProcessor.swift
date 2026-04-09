@@ -1,16 +1,29 @@
 // AudioProcessor.swift
-// Wraps CompressorEngine for the capture pipeline. No AVAudioEngine.
+// Full 8-stage DSP chain for the capture pipeline. No AVAudioEngine.
+//
+// NOTE: After calling setPreset(), caller must also call setSampleRate()
+// to propagate the sample rate to all stateful engines.
 
 import Foundation
 import os
 import OneTakeDSPCore
 import OneTakeDSPPresets
 
-/// Applies a compressor preset to Float32 stereo buffers.
+/// Applies the full 8-stage DSP chain to Float32 stereo buffers.
 /// Called from the capture serial queue — not thread-safe on its own.
 final class AudioProcessor: @unchecked Sendable {
     private var preset: CompressorPreset
-    private var state = CompressorState()
+    private var audioPreset: AudioPreset
+
+    // Per-engine states
+    private var trimState = TrimState()
+    private var gateState = GateState()
+    private var eqState = EQState()
+    private var compState1 = CompressorState()
+    private var compState2 = CompressorState()
+    private var saturationState = SaturationState()
+    private var stereoState = StereoFieldState()
+    private var limiterState = LimiterState()
 
     // Thread-safe peak storage. Updated from captureQueue, read from any thread.
     private let peakLock = OSAllocatedUnfairLock<Float>(initialState: 0)
@@ -20,13 +33,39 @@ final class AudioProcessor: @unchecked Sendable {
 
     init(preset: CompressorPreset = .studio, sampleRate: Float = 48000) {
         self.preset = preset
-        state.sampleRate = sampleRate
+        self.audioPreset = AudioPreset.preset(for: preset.audioPresetType)
+        compState1.sampleRate = sampleRate
+        compState2.sampleRate = sampleRate
+        gateState.sampleRate = sampleRate
+        eqState.sampleRate = sampleRate
+        stereoState.sampleRate = sampleRate
+        limiterState.sampleRate = sampleRate
     }
 
-    /// Switch to a new preset and reset the compressor envelope history.
+    /// Switch to a new preset and reset all engine states.
+    /// Caller must also call setSampleRate() after this.
     func setPreset(_ new: CompressorPreset) {
         preset = new
-        state = CompressorState()
+        audioPreset = AudioPreset.preset(for: new.audioPresetType)
+        trimState = TrimState()
+        gateState = GateState()
+        eqState = EQState()
+        compState1 = CompressorState()
+        compState2 = CompressorState()
+        saturationState = SaturationState()
+        stereoState = StereoFieldState()
+        limiterState = LimiterState()
+    }
+
+    /// Propagates sample rate to all stateful engines. Call from captureQueue.
+    func setSampleRate(_ sr: Float) {
+        compState1.sampleRate = sr
+        compState2.sampleRate = sr
+        gateState.sampleRate = sr
+        eqState.sampleRate = sr
+        eqState.cachedSampleRate = 0  // force EQ coefficient recompute
+        stereoState.sampleRate = sr
+        limiterState.sampleRate = sr
     }
 
     /// Returns the peak linear amplitude since last call and resets the stored peak to 0.
@@ -47,19 +86,71 @@ final class AudioProcessor: @unchecked Sendable {
         }
     }
 
-    /// Process audio in-place. `left` and `right` must each have `frameCount` samples.
+    /// Process audio in-place through the full 8-stage chain.
+    /// `left` and `right` must each have `frameCount` samples.
     func process(
         left: UnsafeMutablePointer<Float>,
         right: UnsafeMutablePointer<Float>,
         frameCount: Int
     ) {
+        let ap = audioPreset
+
+        // Stage 1: Trim
+        TrimEngine.process(
+            left: left, right: right, frameCount: frameCount,
+            settings: TrimSettings(trimDB: ap.inputTrim),
+            state: &trimState
+        )
+
+        // Stage 2: Gate
+        GateEngine.process(
+            left: left, right: right, frameCount: frameCount,
+            settings: ap.noiseGate,
+            state: &gateState
+        )
+
+        // Stage 3: EQ
+        EQEngine.process(
+            left: left, right: right, frameCount: frameCount,
+            settings: ap.eq,
+            state: &eqState
+        )
+
+        // Stage 4: Compressor 1
         CompressorEngine.process(
-            left: left,
-            right: right,
-            frameCount: frameCount,
-            settings: preset.settings,
+            left: left, right: right, frameCount: frameCount,
+            settings: ap.compressor,
             model: preset.model,
-            state: &state
+            state: &compState1
+        )
+
+        // Stage 5: Compressor 2
+        CompressorEngine.process(
+            left: left, right: right, frameCount: frameCount,
+            settings: ap.compressor2,
+            model: preset.model,
+            state: &compState2
+        )
+
+        // Stage 6: Saturation
+        SaturationEngine.process(
+            left: left, right: right, frameCount: frameCount,
+            settings: ap.saturation,
+            state: &saturationState
+        )
+
+        // Stage 7: Stereo Field
+        StereoFieldEngine.process(
+            left: left, right: right, frameCount: frameCount,
+            settings: ap.stereoSpread,
+            state: &stereoState
+        )
+
+        // Stage 8: Limiter
+        LimiterEngine.process(
+            left: left, right: right, frameCount: frameCount,
+            settings: ap.limiter,
+            state: &limiterState
         )
 
         // Compute post-DSP peak across both channels.

@@ -5,6 +5,7 @@ import Foundation
 import OneTakeDSPCore
 import OneTakeDSPPresets
 
+
 public enum CompressorPreset: String, CaseIterable, Identifiable, Sendable {
     case none, studio, studioPlus, live
 
@@ -43,6 +44,15 @@ public enum CompressorPreset: String, CaseIterable, Identifiable, Sendable {
         case .studio: .opto
         case .studioPlus: .fet
         case .live: .vca
+        }
+    }
+
+    public var audioPresetType: AudioPresetType {
+        switch self {
+        case .none: .none
+        case .studio: .studioLight
+        case .studioPlus: .studioHeavy
+        case .live: .live
         }
     }
 }

@@ -91,6 +91,9 @@ final class CameraSession: NSObject, @unchecked Sendable {
     // Accessed from captureQueue only.
     private var stopRequested = false
 
+    // Sample rate initialization guard (captureQueue only)
+    private var hasSetSampleRate = false
+
     // Current video input — kept so we can swap it during lens switching.
     // Accessed from captureQueue only.
     private var currentVideoInput: AVCaptureDeviceInput?
@@ -300,6 +303,7 @@ final class CameraSession: NSObject, @unchecked Sendable {
                 self.lastAudioPTS = .invalid
                 self.expectedAudioDuration = .invalid
                 self.stopRequested = false
+                self.hasSetSampleRate = false
                 self.audioBufferCount = 0
                 self.videoFrameCount = 0
                 self.firstCaptureAudioPTS = .invalid
@@ -520,12 +524,18 @@ extension CameraSession: AVCaptureVideoDataOutputSampleBufferDelegate,
                 logger.info("audio[\(self.audioBufferCount, privacy: .public)] pts=\(pts.seconds, privacy: .public)s samples=\(sampleCount, privacy: .public)")
             }
 
+            // Set sample rate on first audio buffer (internal format is always 48kHz)
+            if !hasSetSampleRate {
+                processor.setSampleRate(48000)
+                hasSetSampleRate = true
+            }
+
             guard let pcmBuffer = converter.toFloat32Buffer(sampleBuffer) else {
                 metrics.droppedAudioBuffers += 1
                 return
             }
 
-            // DSP in-place (LA-2A compressor)
+            // DSP in-place — full 8-stage chain
             guard let leftChannel = pcmBuffer.floatChannelData?[0] else {
                 metrics.droppedAudioBuffers += 1
                 return
