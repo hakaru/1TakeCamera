@@ -23,8 +23,12 @@ public struct RemoteStatus: Codable, Sendable {
 // MARK: - Command type constants
 
 private enum CommandType {
-    static let startRecording = "net.hakaru.1take.camera.start"
-    static let stopRecording  = "net.hakaru.1take.camera.stop"
+    /// Unified command types shared with 1Take (primary).
+    static let startRecording = "net.hakaru.1take.start"
+    static let stopRecording  = "net.hakaru.1take.stop"
+    /// Legacy types for backward compatibility with older Camera builds.
+    static let legacyStart    = "net.hakaru.1take.camera.start"
+    static let legacyStop     = "net.hakaru.1take.camera.stop"
 }
 
 // Payload key for start command
@@ -165,12 +169,12 @@ public final class RemoteControlService {
 
     private func handleIncomingCommand(_ command: Command) async {
         switch command.type {
-        case CommandType.startRecording:
+        case CommandType.startRecording, CommandType.legacyStart:
             let preset = decodePreset(from: command.payload)
             logger.info("Remote start request: preset=\(preset.rawValue)")
             onRemoteStartRequest?(preset)
 
-        case CommandType.stopRecording:
+        case CommandType.stopRecording, CommandType.legacyStop:
             logger.info("Remote stop request")
             onRemoteStopRequest?()
 
