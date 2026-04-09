@@ -2,6 +2,26 @@
 
 All notable changes to 1Take Camera will be documented in this file.
 
+## [0.3.0] - 2026-04-10
+
+Standard camera features + professional audio enhancements.
+
+### Added
+- **Front/rear camera toggle** — switch button in bottom strip, disabled during recording. Lens selector hidden for front camera. Last rear lens restored on switch-back.
+- **Orientation support** — portrait + landscape left/right. Video orientation locked at recording start via `AVAssetWriterInput.transform`. Preview rotation follows device.
+- **4K 30fps** — HD|4K toggle top-left. Bitrate: HD=10Mbps, 4K=25Mbps. Auto-downgrade to HD on unsupported front cameras.
+- **External mic support** — USB-C audio interfaces, Lightning mics (`.usbAudio`, `.headsetMic`, `.lineIn`). Current input name displayed in HUD. Route pinning during recording via `setPreferredInput`.
+- **QuickTime Timecode track** — TC64 embedded in every `.mov` recording. TC source: PeerClock synced wall clock (fallback: device clock). Single-sample at recording start per Apple TN2310. Track associated with video for DAW import (FCP, Resolve, Logic).
+- **AudioInputLabel** view showing active mic name
+- **CaptureResolution** enum (HD/4K) with sessionPreset, videoSize, videoBitRate
+- **SampleBufferConverter.resetFormat()** for route change re-detection
+- **AudioProcessor.resetAllStates()** for DSP state cleanup on camera switch
+
+### Changed
+- Output format: `.mp4` → **`.mov`** (QuickTime TC track requires `.mov` container)
+- MovieWriter accepts `videoSize`, `videoBitRate`, `videoOrientation`, `timecodeStartDate` parameters
+- InterruptionHandler extended with `onRouteChanged` callback
+
 ## [0.2.0] - 2026-04-10
 
 Full DSP chain — all 8 processing stages now run in real-time during recording.
