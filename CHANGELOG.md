@@ -2,6 +2,33 @@
 
 All notable changes to 1Take Camera will be documented in this file.
 
+## [0.2.0] - 2026-04-10
+
+Full DSP chain — all 8 processing stages now run in real-time during recording.
+
+### Added
+- **Full audio processing chain** — 8 stages applied in order:
+  1. Input Trim (scalar gain via vDSP)
+  2. Noise Gate (downward expander, dB-domain envelope follower)
+  3. 4-band Parametric EQ (biquad DF-IIT, Audio EQ Cookbook coefficients)
+  4. Compressor 1 (LA-2A / 1176 / VCA physical modeling — existing)
+  5. Compressor 2 (second-stage compression — existing)
+  6. Saturation (tanh waveshaper with drive/mix/outputGain)
+  7. Stereo Field (M/S width + side-channel HPF)
+  8. Limiter (zero-latency peak-hold, instant attack, exponential release)
+- All DSP engines are **pure Float32 processors** in `OneTakeDSPCore` — no Apple AU black boxes. Sound is fully controlled and reproducible across iOS versions.
+- Each preset (None / Studio / Studio+ / Live) now activates a complete `AudioPreset` with per-stage settings, matching 1Take's signal chain.
+- Sample rate propagation to all engine states on first audio buffer.
+- State reset on preset change for clean transitions.
+
+### Changed
+- `AudioProcessor` expanded from 1-stage (compressor only) to 8-stage chain.
+- `CompressorPreset` now maps to `AudioPresetType` for full preset lookup.
+
+### Verified
+- 4 presets × device recording on wichish: all recordings complete, zero buffer drops.
+- A/V drift: 20-40ms (within lip-sync perception threshold).
+
 ## [0.1.1] - 2026-04-07 (unreleased)
 
 Post-MVP polish.
