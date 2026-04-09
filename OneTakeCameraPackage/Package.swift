@@ -12,7 +12,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../../1Take/OneTakePackage"),
-        .package(url: "https://github.com/hakaru/PeerClock.git", branch: "main"),
+        .package(url: "https://github.com/hakaru/PeerClock.git", from: "0.2.0"),
     ],
     targets: [
         .target(
