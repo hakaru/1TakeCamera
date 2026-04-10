@@ -2,6 +2,13 @@
 // Owns AVCaptureSession: rear camera 1080p30 + built-in mic.
 // All mutable state is accessed only from captureQueue (serial).
 // UI callbacks are dispatched to @MainActor.
+//
+// TODO: CameraSession is 915+ lines and should be split into focused sub-modules:
+//   - LensManager (lens discovery + switching)
+//   - ResolutionManager (resolution negotiation + downgrade logic)
+//   - AudioRouteMonitor (input label refresh + interruption handling)
+//   - RecordingCoordinator (begin/stop/finalize, PTS bookkeeping)
+// This refactor is tracked separately and must not be attempted in a single pass.
 
 import AVFoundation
 import CoreMedia
@@ -28,7 +35,7 @@ struct LensOption: Identifiable, Hashable, Sendable {
 
 // MARK: - CameraSession
 
-/// Manages the AVCaptureSession lifecycle for the PoC.
+/// Manages the AVCaptureSession lifecycle.
 /// Internal state is protected by a dedicated serial capture queue.
 /// `onStateChange` is always called on the main actor.
 final class CameraSession: NSObject, @unchecked Sendable {
@@ -110,7 +117,7 @@ final class CameraSession: NSObject, @unchecked Sendable {
     /// Exposes the underlying AVCaptureSession for preview layer binding.
     var captureSession: AVCaptureSession { session }
     private var movieWriter: MovieWriter?
-    private let converter: SampleBufferConverter
+    private let converter: SampleBufferConverter?
     private let processor: AudioProcessor
     private let metrics: CaptureMetrics
 
@@ -162,15 +169,9 @@ final class CameraSession: NSObject, @unchecked Sendable {
     // MARK: - Init
 
     override init() {
-        guard let conv = SampleBufferConverter() else {
-            fatalError("SampleBufferConverter init failed")
-        }
-        self.converter = conv
+        self.converter = SampleBufferConverter()
         self.processor = AudioProcessor(sampleRate: Float(SampleBufferConverter.internalSampleRate))
-        self.metrics = CaptureMetrics(queue: DispatchQueue(
-            label: "net.hakaru.OneTakeCamera.metrics",
-            qos: .utility
-        ))
+        self.metrics = CaptureMetrics(queue: captureQueue)
         super.init()
     }
 
@@ -221,6 +222,11 @@ final class CameraSession: NSObject, @unchecked Sendable {
     /// viewfinder shows a live preview before recording begins.
     /// Does NOT attach a MovieWriter — call `start30SecondRecording()` to begin capture.
     func prewarm() async -> Bool {
+        guard converter != nil else {
+            logger.error("SampleBufferConverter init failed — cannot prewarm")
+            notifyState(.failed("Audio pipeline initialization failed"))
+            return false
+        }
         let granted = await requestPermissionsAndSetup()
         guard granted else { return false }
         if !session.isRunning {
@@ -279,12 +285,12 @@ final class CameraSession: NSObject, @unchecked Sendable {
             // Route-change callback: update audio input label + reset format cache when idle.
             handler.onRouteChanged = { [weak self] in
                 guard let self else { return }
-                var isRecording = false
-                self.captureQueue.sync { isRecording = self.movieWriter != nil }
-                if !isRecording {
-                    // Reset converter so next recording picks up the new format.
-                    self.captureQueue.async { [weak self] in
-                        self?.converter.resetFormat()
+                // Use async to avoid deadlock risk from the notification queue into captureQueue.
+                self.captureQueue.async { [weak self] in
+                    guard let self else { return }
+                    let isRecording = self.movieWriter != nil
+                    if !isRecording {
+                        self.converter?.resetFormat()
                     }
                 }
                 // Always refresh the UI label.
@@ -689,10 +695,11 @@ final class CameraSession: NSObject, @unchecked Sendable {
             self.currentPosition = targetPosition
 
             // Check resolution compatibility after adding new input.
-            var resolvedResolution = self.currentResolution
-            if self.currentResolution != .hd,
-               !self.session.canSetSessionPreset(self.currentResolution.sessionPreset) {
-                logger.info("switchCamera: downgrading from \(self.currentResolution.rawValue, privacy: .public) to HD — not supported")
+            let originalResolution = self.currentResolution
+            var resolvedResolution = originalResolution
+            if originalResolution != .hd,
+               !self.session.canSetSessionPreset(originalResolution.sessionPreset) {
+                logger.info("switchCamera: downgrading from \(originalResolution.rawValue, privacy: .public) to HD — not supported")
                 resolvedResolution = .hd
                 self.session.sessionPreset = CaptureResolution.hd.sessionPreset
             }
@@ -718,8 +725,7 @@ final class CameraSession: NSObject, @unchecked Sendable {
                     : self.lastRearLensID
             )
             let resolutionForUI = resolvedResolution
-            let downgradedFromFour = resolvedResolution != self.currentResolution || (self.currentResolution == .hd && resolvedResolution == .hd && false)
-            let wasDowngraded = (resolvedResolution == .hd && self.currentResolution == .fourK)
+            let wasDowngraded = (originalResolution == .fourK && resolvedResolution == .hd)
 
             // Notify UI.
             let onDowngrade = self.onResolutionDowngrade
@@ -864,7 +870,8 @@ extension CameraSession: AVCaptureVideoDataOutputSampleBufferDelegate,
                 hasSetSampleRate = true
             }
 
-            guard let pcmBuffer = converter.toFloat32Buffer(sampleBuffer) else {
+            guard let conv = converter,
+                  let pcmBuffer = conv.toFloat32Buffer(sampleBuffer) else {
                 metrics.droppedAudioBuffers += 1
                 return
             }
@@ -882,7 +889,7 @@ extension CameraSession: AVCaptureVideoDataOutputSampleBufferDelegate,
                 frameCount: Int(pcmBuffer.frameLength)
             )
 
-            guard let outBuffer = converter.toCMSampleBuffer(pcmBuffer, timingInfo: timingInfo) else {
+            guard let outBuffer = conv.toCMSampleBuffer(pcmBuffer, timingInfo: timingInfo) else {
                 metrics.droppedAudioBuffers += 1
                 return
             }

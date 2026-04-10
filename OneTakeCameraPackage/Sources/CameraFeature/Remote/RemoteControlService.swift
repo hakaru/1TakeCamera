@@ -57,6 +57,9 @@ public final class RemoteControlService {
     private(set) var peerClock: PeerClock?
     private var streamTasks: [Task<Void, Never>] = []
 
+    /// PeerIDs seen in the `clock.peers` stream — used to validate incoming commands.
+    private var knownPeerIDs: Set<PeerID> = []
+
     /// Heartbeat timer task — runs every 5s while recording.
     /// Known limitation: backgrounding may delay the timer (MVP).
     private var heartbeatTask: Task<Void, Never>?
@@ -74,7 +77,8 @@ public final class RemoteControlService {
         let clock = PeerClock(configuration: .default)
         self.peerClock = clock
 
-        Task {
+        Task { [weak self] in
+            guard let self else { return }
             do {
                 try await clock.start()
                 await MainActor.run {
@@ -111,10 +115,17 @@ public final class RemoteControlService {
             let peersTask = Task { [weak self] in
                 for await peers in clock.peers {
                     guard let self else { return }
-                    let count = peers.filter { $0.id != clock.localPeerID }.count
+                    let remotePeers = peers.filter { $0.id != clock.localPeerID }
+                    let count = remotePeers.count
+                    let peerIDs = Set(remotePeers.map { $0.id })
                     await MainActor.run {
                         self.peerCount = count
+                        self.knownPeerIDs = peerIDs
                         self.coordinatorID = clock.coordinatorID?.description
+                        // Publish status on peer discovery (don't wait for sync)
+                        if count > 0 {
+                            self.publishStatusUpdate()
+                        }
                     }
                 }
             }
@@ -124,7 +135,7 @@ public final class RemoteControlService {
                 for await (sender, command) in clock.commands {
                     guard let self else { return }
                     logger.info("Received command '\(command.type)' from \(sender)")
-                    await self.handleIncomingCommand(command)
+                    await self.handleIncomingCommand(command, from: sender)
                 }
             }
 
@@ -144,6 +155,7 @@ public final class RemoteControlService {
         peerClock = nil
         isRunning = false
         peerCount = 0
+        knownPeerIDs = []
         syncStateDescription = "Stopped"
 
         Task {
@@ -187,7 +199,11 @@ public final class RemoteControlService {
 
     // MARK: - Private
 
-    private func handleIncomingCommand(_ command: Command) async {
+    private func handleIncomingCommand(_ command: Command, from sender: PeerID) async {
+        guard knownPeerIDs.contains(sender) else {
+            logger.warning("Ignoring command '\(command.type)' from unknown peer \(sender)")
+            return
+        }
         switch command.type {
         case CommandType.startRecording, CommandType.legacyStart:
             let preset = decodePreset(from: command.payload)

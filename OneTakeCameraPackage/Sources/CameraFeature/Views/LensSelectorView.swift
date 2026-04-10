@@ -16,7 +16,7 @@ struct LensSelectorView: View {
                 } label: {
                     Text(lens.displayName)
                         .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        .foregroundColor(selection == lens.id ? .black : .white)
+                        .foregroundStyle(selection == lens.id ? Color.black : Color.white)
                         .frame(width: 44, height: 44)
                         .background(
                             Circle().fill(

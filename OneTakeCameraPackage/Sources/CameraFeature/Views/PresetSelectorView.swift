@@ -25,7 +25,7 @@ public struct PresetSelectorView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .background(selection == preset ? Color.blue : Color.black.opacity(0.5))
-                    .foregroundColor(.white)
+                    .foregroundStyle(.white)
                     .cornerRadius(8)
                 }
                 .disabled(!isEnabled)

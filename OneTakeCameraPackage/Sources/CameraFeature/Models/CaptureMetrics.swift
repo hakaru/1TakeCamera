@@ -1,5 +1,5 @@
 // CaptureMetrics.swift
-// Diagnostic counters for v0.0 PoC — logged via os.Logger every second.
+// Diagnostic counters for the capture pipeline — logged via os.Logger every second.
 
 import Foundation
 import os

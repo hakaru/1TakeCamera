@@ -3,6 +3,7 @@
 // Format conversion happens here — once only per spec.
 
 import AVFoundation
+import Accelerate
 import CoreMedia
 import os
 
@@ -21,8 +22,12 @@ final class SampleBufferConverter: @unchecked Sendable {
     private var inputFormat: AVAudioFormat?
     private let outputFormat: AVAudioFormat
 
-    // Pre-computed CMAudioFormatDescription for the internal format
+    // Pre-computed CMAudioFormatDescription for the non-interleaved internal format (AVAudioConverter output).
     let outputCMFormat: CMAudioFormatDescription
+
+    // Pre-computed CMAudioFormatDescription for the interleaved output written to CMSampleBuffer
+    // (AAC encoder expects interleaved Float32).
+    let interleavedCMFormat: CMAudioFormatDescription
 
     init?() {
         guard let fmt = AVAudioFormat(
@@ -36,6 +41,7 @@ final class SampleBufferConverter: @unchecked Sendable {
         }
         self.outputFormat = fmt
 
+        // Non-interleaved format description (used internally)
         var cmFmt: CMAudioFormatDescription?
         var asbd = fmt.streamDescription.pointee
         let status = CMAudioFormatDescriptionCreate(
@@ -53,6 +59,36 @@ final class SampleBufferConverter: @unchecked Sendable {
             return nil
         }
         self.outputCMFormat = cmFmt
+
+        // Interleaved format description (written to CMSampleBuffer for AAC encoding)
+        let bytesPerFrame = MemoryLayout<Float>.size
+        var interleavedASBD = AudioStreamBasicDescription(
+            mSampleRate: Self.internalSampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: UInt32(bytesPerFrame * Int(Self.internalChannelCount)),
+            mFramesPerPacket: 1,
+            mBytesPerFrame: UInt32(bytesPerFrame * Int(Self.internalChannelCount)),
+            mChannelsPerFrame: Self.internalChannelCount,
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+        var interleavedFmt: CMAudioFormatDescription?
+        let interleavedStatus = CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            asbd: &interleavedASBD,
+            layoutSize: 0,
+            layout: nil,
+            magicCookieSize: 0,
+            magicCookie: nil,
+            extensions: nil,
+            formatDescriptionOut: &interleavedFmt
+        )
+        guard interleavedStatus == noErr, let interleavedFmt else {
+            logger.error("Failed to create interleaved CMAudioFormatDescription: \(interleavedStatus, privacy: .public)")
+            return nil
+        }
+        self.interleavedCMFormat = interleavedFmt
     }
 
     // MARK: - Format Reset
@@ -343,13 +379,17 @@ final class SampleBufferConverter: @unchecked Sendable {
             return nil
         }
 
-        // For simplicity in PoC: interleave L+R into the block buffer
+        // Interleave L+R into the block buffer using vDSP_ztoc for efficiency.
         var interleavedBytes = [Float](repeating: 0, count: frameCount * channelCount)
         let leftPtr = channelData[0]
         let rightPtr = channelCount >= 2 ? channelData[1] : channelData[0]
-        for i in 0..<frameCount {
-            interleavedBytes[i * 2]     = leftPtr[i]
-            interleavedBytes[i * 2 + 1] = rightPtr[i]
+        interleavedBytes.withUnsafeMutableBufferPointer { dst in
+            var splitComplex = DSPSplitComplex(realp: leftPtr, imagp: rightPtr)
+            // vDSP_ztoc interleaves non-interleaved (split) complex into packed:
+            // [L0,R0, L1,R1, ...] — stride 1 in, stride 2 out (each DSPComplex = 2 Floats)
+            dst.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: frameCount) { complexDst in
+                vDSP_ztoc(&splitComplex, 1, complexDst, 2, vDSP_Length(frameCount))
+            }
         }
         bbStatus = CMBlockBufferReplaceDataBytes(
             with: interleavedBytes,
@@ -362,33 +402,8 @@ final class SampleBufferConverter: @unchecked Sendable {
             return nil
         }
 
-        // Build an interleaved ASBD for the writer (AAC encoder expects interleaved)
-        var asbd = AudioStreamBasicDescription(
-            mSampleRate: Self.internalSampleRate,
-            mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-            mBytesPerPacket: UInt32(bytesPerFrame * channelCount),
-            mFramesPerPacket: 1,
-            mBytesPerFrame: UInt32(bytesPerFrame * channelCount),
-            mChannelsPerFrame: UInt32(channelCount),
-            mBitsPerChannel: 32,
-            mReserved: 0
-        )
-        var cmFmtDesc: CMAudioFormatDescription?
-        let fmtStatus = CMAudioFormatDescriptionCreate(
-            allocator: kCFAllocatorDefault,
-            asbd: &asbd,
-            layoutSize: 0,
-            layout: nil,
-            magicCookieSize: 0,
-            magicCookie: nil,
-            extensions: nil,
-            formatDescriptionOut: &cmFmtDesc
-        )
-        guard fmtStatus == noErr, let cmFmtDesc else {
-            logger.error("CMAudioFormatDescriptionCreate failed: \(fmtStatus, privacy: .public)")
-            return nil
-        }
+        // Reuse the pre-computed interleaved CMAudioFormatDescription from init.
+        let cmFmtDesc = interleavedCMFormat
 
         // Recompute duration from the post-conversion frame count at 48kHz.
         // PTS is preserved from the original capture timing.

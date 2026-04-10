@@ -65,7 +65,7 @@ final class MovieWriter: @unchecked Sendable {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let filename = "1TakeCam-\(formatter.string(from: timecodeStartDate)).mov"
+        let filename = "1TakeCam-\(formatter.string(from: timecodeStartDate))-\(UUID().uuidString.prefix(4)).mov"
         let url = docs.appendingPathComponent(filename)
 
         guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mov) else {
@@ -403,7 +403,16 @@ final class MovieWriter: @unchecked Sendable {
         let pendingFirstAudioPTS: CMTime
 
         func write(nextTo movURL: URL, logger: Logger) {
-            let jsonURL = movURL.deletingPathExtension().appendingPathExtension("json")
+            // Write diagnostics to Application Support/Diagnostics/ (not Documents)
+            let fm = FileManager.default
+            let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            let diagDir = appSupport.appendingPathComponent("Diagnostics", isDirectory: true)
+            if !fm.fileExists(atPath: diagDir.path) {
+                try? fm.createDirectory(at: diagDir, withIntermediateDirectories: true)
+            }
+            let jsonURL = diagDir.appendingPathComponent(
+                movURL.deletingPathExtension().lastPathComponent
+            ).appendingPathExtension("json")
 
             let startupSkew_ms = (pendingFirstVideoPTS.isValid && pendingFirstAudioPTS.isValid)
                 ? (pendingFirstVideoPTS.seconds - pendingFirstAudioPTS.seconds) * 1000
