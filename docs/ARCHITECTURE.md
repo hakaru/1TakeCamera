@@ -120,10 +120,32 @@ Recordings land in the app's Documents folder as `1TakeCam-YYYYMMDD-HHmmss.mp4`.
 
 MP4 metadata: `commonIdentifierSoftware` tag set to `"1Take Camera (<preset name>)"`, e.g. `"1Take Camera (Studio+)"`.
 
-## Known limitations (v0.1)
+## PeerClock integration (v0.3+)
 
-- Compressor is the only DSP stage. Other stages (noise gate, EQ, saturation, M/S, limiter) live inside 1Take's `OneTakeDSPEngine` and require further extraction before they can be reused here.
-- Portrait-only orientation, rear camera only, 1080p 30fps fixed.
+1Take Camera participates in multi-device sessions as a **slave** device. The master controller runs in [1Take v1.7.0](https://github.com/hakaru/1Take).
+
+### Protocol
+
+| Topic | Direction | Payload |
+|-------|-----------|---------|
+| `net.hakaru.1take.start` | master → slave | preset name (optional) |
+| `net.hakaru.1take.stop` | master → slave | — |
+| `net.hakaru.1take.status` | slave → master | `DeviceStatus` JSON (name, appType, state, preset) |
+
+### Status publishing flow
+
+1. **On peer discovery** — publish current `DeviceStatus` immediately.
+2. **On sync** — publish status with updated wall-clock offset.
+3. **During recording** — 5-second heartbeat via `statusHeartbeatTimer`.
+4. **On remote stop** — publish `finalizing` state, then `idle` after `AVAssetWriter.finishWriting`.
+
+### Timecode
+
+iOS `AVAssetWriter` does not support `.timecode` media type (macOS only). Instead, 1Take Camera embeds a `quickTimeMetadataCreationDate` ISO8601 string at recording start. FCP X and DaVinci Resolve can use this for timeline placement when PeerClock-synced wall-clock time is used as the source.
+
+## Known limitations (v0.3)
+
 - No custom preset save/load.
 - Sidecar JSON is always written (intended as diagnostic only — to be toggled off before public release).
-- Final A/V drift is ~22 ms (audio slightly longer than video). Within the 40 ms lip-sync perception threshold.
+- Final A/V drift is 20–40 ms (within the 40 ms lip-sync perception threshold).
+- Timecode is QuickTime metadata only (not a true TC track); sub-frame accuracy depends on PeerClock sync quality.

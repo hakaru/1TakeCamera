@@ -2,6 +2,15 @@
 
 All notable changes to 1Take Camera will be documented in this file.
 
+## [0.3.1] - 2026-04-10
+
+Phase C interop + QuickTime timecode fix.
+
+### Fixed
+- **QuickTime Timecode**: iOS `AVAssetWriter` does not support `.timecode` input type (TC32/TC64 both fail). Replaced with QuickTime metadata (`quickTimeMetadataCreationDate` ISO8601) — FCP/Resolve can read this for timeline placement.
+- **Phase C interop**: Unified DeviceStatus schema (`net.hakaru.1take.status`), heartbeat timer, publish status on peer discovery and sync, finalizing state broadcast on remote stop
+- **vendor/1Take submodule** updated to include StatusValueEncoder fix
+
 ## [0.3.0] - 2026-04-10
 
 Standard camera features + professional audio enhancements.

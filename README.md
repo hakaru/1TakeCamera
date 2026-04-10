@@ -10,7 +10,7 @@ The audio track in your MP4 file is already mixed and mastered when the recordin
 
 ## Status
 
-**v0.1.0 built and running on device** (not yet on TestFlight). Manual start/stop recording, lens switching, 4 compressor character presets, level metering, clip warning, recording list with Save-to-Photos. See [CHANGELOG.md](CHANGELOG.md) for full history.
+**v0.3.1 — Phase C interop complete** (not yet on TestFlight). Full 8-stage DSP chain, 4K/HD recording, front/rear camera, orientation support, external mic support, QuickTime metadata timecode, and Phase C multi-device interop with [1Take v1.7.0](https://github.com/hakaru/1Take). See [CHANGELOG.md](CHANGELOG.md) for full history.
 
 ## Architecture
 
@@ -18,40 +18,36 @@ The audio track in your MP4 file is already mixed and mastered when the recordin
 - SwiftUI + SPM package architecture (mirrors [1Take](https://github.com/hakaru/1Take))
 - Real-time audio DSP via `OneTakeDSPCore` SPM package (extracted from 1Take)
 - AVCaptureSession + AVCaptureVideoDataOutput + AVCaptureAudioDataOutput → DSP → AVAssetWriter pipeline
-- MP4 (H.264 + AAC) output
+- MOV (H.264 + AAC + QuickTime metadata timecode) output
 
 ## Roadmap
 
-### v0.0 — PoC (Technical Gate)
+### v0.0 — PoC (Technical Gate) ✅
 30-second recording with one preset. Validates the entire pipeline before any UI work.
 
-### v0.1 — MVP ✅ built
+### v0.1 — MVP ✅
 - Portrait, rear camera, 1080p 30fps
 - 4 audio presets (None / Studio LA-2A / Studio+ 1176 / Live VCA)
-- Real-time DSP processing (compressor only — other stages in v0.2)
-- Manual start/stop recording, no length limit
-- Ultra-wide / wide / telephoto lens switching
-- Full-screen viewfinder, iOS-camera-style bottom control strip
-- Post-DSP level meter + clip warning overlay
-- Recording list with Quick Look playback, swipe-to-delete, Save to Photos
-- Interruption handling (calls / Siri / route change)
-- Thermal state monitoring (log-only for v0.1)
-- A/V sync: ~22 ms (within lip-sync perception threshold)
-- 1Take-style app icon
+- Real-time DSP processing (compressor only)
+- Manual start/stop recording, recording list
 
-### v0.2 — Full Effect Chain + Standard Features
-- Full OneTakeDSPCore chain: NoiseGate / EQ / Compressor1 / Compressor2 / Saturation / M/S / Limiter (requires further extraction in 1Take v1.7.0)
-- Front/rear toggle, orientation support, 4K 30fps option
-- Custom preset save/load
-- QuickTime timecode track
+### v0.2 — Full Effect Chain + Standard Features ✅
+- Full OneTakeDSPCore chain: Trim / NoiseGate / EQ / Compressor1 / Compressor2 / Saturation / M/S / Limiter
+- Front/rear toggle, orientation support (portrait + landscape), 4K 30fps option
 - External USB-C audio interfaces with route-change handling
-- Progressive thermal degradation (disable heavy stages on `.serious`+)
-- TestFlight public beta
+- QuickTime metadata timecode track (ISO8601, FCP/Resolve compatible)
 
-### v0.3 — AI + Sync (Pro)
+### v0.3 — Phase C Interop ✅
+- [PeerClock](https://github.com/hakaru/PeerClock) v0.2.0 integration for multi-device sync
+- Unified DeviceStatus schema with [1Take v1.7.0](https://github.com/hakaru/1Take)
+- Slave mode: receive Start/Stop from 1Take master controller
+- 5-second heartbeat, finalizing state broadcast on remote stop
+
+### v0.4 — AI + TestFlight (planned)
 - AI Settings Optimizer
-- [PeerClock](https://github.com/hakaru/PeerClock) integration for multi-device sync
-- Master/slave with [1Take](https://github.com/hakaru/1Take)
+- Progressive thermal degradation (disable heavy stages on `.serious`+)
+- Custom preset save/load
+- TestFlight public beta
 
 ## Related Projects
 
