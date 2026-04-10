@@ -65,7 +65,9 @@ final class MovieWriter: @unchecked Sendable {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let filename = "1TakeCam-\(formatter.string(from: timecodeStartDate))-\(UUID().uuidString.prefix(4)).mov"
+        let deviceTag = Self.recordingDeviceTag()
+        let shortUUID = UUID().uuidString.prefix(4).lowercased()
+        let filename = "1TakeCam_\(deviceTag)_\(formatter.string(from: timecodeStartDate))-\(shortUUID).mov"
         let url = docs.appendingPathComponent(filename)
 
         guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mov) else {
@@ -451,5 +453,17 @@ final class MovieWriter: @unchecked Sendable {
                 logger.error("Failed to write sidecar JSON: \(error.localizedDescription, privacy: .public)")
             }
         }
+    }
+
+    /// Returns a filesystem-safe device tag in the form "DeviceName_XXXX"
+    /// where XXXX is the last 4 chars of the vendor UUID for uniqueness on iOS 16+.
+    private static func recordingDeviceTag() -> String {
+        let raw = UIDevice.current.name
+        let sanitized = raw
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+        let suffix = String(UIDevice.current.identifierForVendor?.uuidString.suffix(4) ?? "0000")
+        return "\(sanitized)_\(suffix)"
     }
 }
