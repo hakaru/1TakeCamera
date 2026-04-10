@@ -100,6 +100,8 @@ public final class RemoteControlService {
                         if case .synced(_, let quality) = state {
                             self.coordinatorID = clock.coordinatorID?.description
                             logger.debug("Synced: offset=\(quality.offsetNs)ns conf=\(quality.confidence, format: .fixed(precision: 2))")
+                            // Publish initial status so 1Take discovers this device immediately
+                            self.publishStatusUpdate()
                         }
                     }
                 }

@@ -131,9 +131,9 @@ final class MovieWriter: @unchecked Sendable {
                 sourceFormatHint: tcFmtDesc
             )
             tcInput.expectsMediaDataInRealTime = true
-            // Associate TC track with video track so QuickTime/FCP can find it.
-            vi.addTrackAssociation(withTrackOf: tcInput, type: AVAssetTrack.AssociationType.timecode.rawValue)
             writer.add(tcInput)
+            // Associate TC track with video track AFTER adding both inputs to the writer.
+            vi.addTrackAssociation(withTrackOf: tcInput, type: AVAssetTrack.AssociationType.timecode.rawValue)
             self.timecodeInput = tcInput
         } else {
             logger.error("CMTimeCodeFormatDescriptionCreate failed: \(tcStatus, privacy: .public)")
