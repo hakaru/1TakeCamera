@@ -111,35 +111,22 @@ final class MovieWriter: @unchecked Sendable {
         writer.add(vi)
         writer.add(ai)
 
-        // Timecode input: QuickTime TC64, 30fps non-drop
-        var tcFmtDesc: CMTimeCodeFormatDescription?
-        let frameDuration = CMTime(value: 1, timescale: 30)
-        let tcStatus = CMTimeCodeFormatDescriptionCreate(
-            allocator: kCFAllocatorDefault,
-            timeCodeFormatType: kCMTimeCodeFormatType_TimeCode64,
-            frameDuration: frameDuration,
-            frameQuanta: 30,
-            flags: 0,  // non-drop frame
-            extensions: nil,
-            formatDescriptionOut: &tcFmtDesc
-        )
-        if tcStatus == noErr, let tcFmtDesc {
-            self.tcFormatDescription = tcFmtDesc
-            let tcInput = AVAssetWriterInput(
-                mediaType: .timecode,
-                outputSettings: nil,
-                sourceFormatHint: tcFmtDesc
-            )
-            tcInput.expectsMediaDataInRealTime = true
-            writer.add(tcInput)
-            // Associate TC track with video track AFTER adding both inputs to the writer.
-            vi.addTrackAssociation(withTrackOf: tcInput, type: AVAssetTrack.AssociationType.timecode.rawValue)
-            self.timecodeInput = tcInput
-        } else {
-            logger.error("CMTimeCodeFormatDescriptionCreate failed: \(tcStatus, privacy: .public)")
-            self.timecodeInput = nil
-            self.tcFormatDescription = nil
-        }
+        // Timecode as metadata (iOS does NOT support AVAssetWriterInput .timecode media type)
+        // Embed start timecode in the file's metadata instead of a dedicated TC track.
+        // FCP/Resolve can read this from QuickTime metadata.
+        self.timecodeInput = nil
+        self.tcFormatDescription = nil
+
+        let tcItem = AVMutableMetadataItem()
+        tcItem.identifier = .quickTimeMetadataCreationDate
+        let isoFormatter = ISO8601DateFormatter()
+        tcItem.value = isoFormatter.string(from: timecodeStartDate) as NSString
+
+        let presetItem = AVMutableMetadataItem()
+        presetItem.identifier = .commonIdentifierSoftware
+        presetItem.value = "1Take Camera (\(presetName))" as NSString
+
+        writer.metadata = [tcItem, presetItem]
     }
 
     // MARK: - Orientation Transform
@@ -278,20 +265,21 @@ final class MovieWriter: @unchecked Sendable {
 
         logger.info("Timecode start: \(String(format: "%02d:%02d:%02d:%02d", h, m, s, f), privacy: .public) (frame \(frameNumber, privacy: .public))")
 
-        // 8-byte big-endian Int64 frame number (TimeCode64 format)
-        var frameNumberBE = frameNumber.bigEndian
-        let data = Data(bytes: &frameNumberBE, count: 8)
+        // 4-byte big-endian Int32 frame number (TimeCode32 format)
+        let frameNumber32 = Int32(frameNumber)
+        var frameNumberBE = frameNumber32.bigEndian
+        let data = Data(bytes: &frameNumberBE, count: 4)
 
         var blockBuffer: CMBlockBuffer?
         let bbStatus = data.withUnsafeBytes { rawBuf -> OSStatus in
             CMBlockBufferCreateWithMemoryBlock(
                 allocator: kCFAllocatorDefault,
                 memoryBlock: UnsafeMutableRawPointer(mutating: rawBuf.baseAddress!),
-                blockLength: 8,
+                blockLength: 4,
                 blockAllocator: kCFAllocatorNull,
                 customBlockSource: nil,
                 offsetToData: 0,
-                dataLength: 8,
+                dataLength: 4,
                 flags: 0,
                 blockBufferOut: &blockBuffer
             )
